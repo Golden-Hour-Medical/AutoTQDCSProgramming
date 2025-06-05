@@ -1,0 +1,22 @@
+# AutoTQ Programming Tools - Required Dependencies
+
+# Core dependencies
+pyserial>=3.5
+requests>=2.28.0
+urllib3>=1.26.0
+
+# Firmware flashing
+esptool>=4.0.0
+
+# Progress bars and user interface
+tqdm>=4.64.0
+
+# Optional but recommended packages
+psutil>=5.9.0
+cryptography>=3.4.0
+
+# For better handling of distro detection on Linux
+distro>=1.7.0; sys_platform == "linux"
+
+# Additional utilities
+pathlib2>=2.3.0; python_version < '3.4'  # Backport for older Python 

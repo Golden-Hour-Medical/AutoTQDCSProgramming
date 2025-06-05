@@ -1,0 +1,7 @@
+{
+  "access_token": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJkZXZpbmdhdG9yIiwicm9sZSI6InRlY2huaWNpYW4iLCJleHAiOjE3NDkwOTgxMDB9.4uhFUie_sLXP_vp5RxdRnkFslHVOntmujfRhWgfkIVc",
+  "token_type": "bearer",
+  "training_completed": true,
+  "requires_training": false,
+  "saved_at": "2025-06-05T00:03:26.832875"
+}

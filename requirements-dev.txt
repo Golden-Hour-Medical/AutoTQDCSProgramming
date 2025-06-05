@@ -1,0 +1,24 @@
+# Include main requirements
+-r requirements.txt
+
+# Code quality and formatting
+black>=22.0.0
+isort>=5.10.0
+flake8>=4.0.0
+mypy>=0.950
+
+# Security scanning
+bandit>=1.7.0
+safety>=2.0.0
+
+# Testing
+pytest>=7.0.0
+pytest-cov>=3.0.0
+pytest-mock>=3.7.0
+
+# Development tools
+pre-commit>=2.17.0
+
+# Additional security tools (for CI)
+semgrep>=1.0.0
+pip-audit>=2.0.0 
