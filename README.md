@@ -263,6 +263,54 @@ D:\AutoTQDCSProgramming\
 └── setup_and_program.sh           # Linux/Mac script
 ```
 
+## 🔒 Version Control & Security
+
+### Automatic Git Exclusions
+
+The project includes a comprehensive `.gitignore` file that automatically excludes temporary and sensitive files:
+
+#### Generated/Downloaded Files
+- `firmware/` - Downloaded firmware binaries (large files, updated frequently)
+- `audio/` - Downloaded audio files (large files, updated frequently)
+- `autotq_manifest.json` - Download metadata and version tracking
+- `autotq_setup.log` - Setup and operation logs
+
+#### Security & Credentials
+- `autotq_token.json` - **Authentication tokens** (⚠️ **NEVER commit to git**)
+- `.autotq_credentials` - Encrypted saved credentials
+- `.autotq_salt` - Encryption salt for credential storage
+
+#### Temporary Files
+- `autotq_setup.lock` - Process lock files
+- `*.tmp`, `*.temp` - Temporary download files
+- `__pycache__/` - Python bytecode cache
+
+#### Development Files
+- `.vscode/`, `.idea/` - IDE configuration
+- `*.pyc`, `*.pyo` - Compiled Python files
+- `.mypy_cache/` - Type checker cache
+
+### ⚠️ Important Security Notes
+
+**DO NOT commit authentication tokens:**
+- The `autotq_token.json` file contains your login session token
+- Committing this file would expose your credentials in git history
+- The `.gitignore` file automatically excludes this file
+
+**For team development:**
+1. Each developer should run `python autotq_setup.py` to authenticate individually
+2. Authentication tokens are unique per user and session
+3. Downloaded firmware/audio files are excluded to avoid large commits
+4. Use `python autotq_setup.py` to get the latest files instead of committing them
+
+**Clean setup for new users:**
+```bash
+git clone <repository>
+cd <repository>
+python autotq_setup.py  # Downloads files and authenticates
+python autotq_programmer.py  # Ready to program devices
+```
+
 ## 🎯 Recommended Workflow
 
 ### For Production Use
