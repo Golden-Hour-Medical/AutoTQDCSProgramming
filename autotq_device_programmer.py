@@ -2,7 +2,7 @@
 """
 AutoTQ Device Programmer - Direct ESP32-S3 Audio File Transfer
 Connects to AutoTQ devices via USB serial and transfers audio files
-using the same protocol as the manufacturer portal.
+using the optimized protocol based on JavaScript implementation.
 """
 
 import os
@@ -39,25 +39,51 @@ except ImportError:
     HAS_REQUESTS = False
     print("⚠️  Warning: requests not installed. Cannot download from server.")
 
+# ANSI color codes for clear output formatting
+class Colors:
+    HEADER = '\033[95m'
+    OKBLUE = '\033[94m'
+    OKCYAN = '\033[96m'
+    OKGREEN = '\033[92m'
+    WARNING = '\033[93m'
+    FAIL = '\033[91m'
+    ENDC = '\033[0m'
+    BOLD = '\033[1m'
+    UNDERLINE = '\033[4m'
+
 
 class AutoTQDeviceProgrammer:
-    """AutoTQ Device Programmer for ESP32-S3 devices"""
+    """
+    AutoTQ Device Programmer for ESP32-S3 devices.
+    Optimized audio file transfer system based on JavaScript implementation.
+    """
     
     # Required audio files for AutoTQ devices
     REQUIRED_AUDIO_FILES = [
-        "tightenStrap.wav",
-        "bleedingContinues.wav", 
-        "pullStrapTighter.wav",
-        "inflating.wav",
-        "timeRemaining.wav"
+        'tightenStrap.wav',
+        'bleedingContinues.wav', 
+        'pullStrapTighter.wav',
+        'inflating.wav',
+        'timeRemaining.wav',
+        'reattachStrap.wav'
     ]
     
-    # Serial communication settings
-    BAUD_RATE = 115200
-    TIMEOUT = 5.0
-    WRITE_CHUNK_SIZE = 256  # ESP32 write size per operation
-    WRITE_DELAY = 0.001   # 2ms delay between writes
-    FILE_CHUNK_SIZE = 2048  # File transfer chunk size
+    # Serial communication parameters - optimized for reliability
+    SERIAL_PARAMS = {
+        'baudrate': 115200,
+        'bytesize': serial.EIGHTBITS,
+        'parity': serial.PARITY_NONE,
+        'stopbits': serial.STOPBITS_ONE,
+        'xonxoff': False,
+        'rtscts': False,
+        'dsrdtr': False,
+        'timeout': 5
+    }
+    
+    # Transfer parameters - Conservative settings to prevent CRC failures
+    CHUNK_SIZE = 1024  # Small chunks to avoid overwhelming device
+    SEND_SIZE = 128    # Small pieces for reliable transfer
+    PIECE_DELAY = 0.005  # 5ms delay for device flash write processing
     
     def __init__(self, port: str = None, audio_dir: str = None, server_url: str = None):
         """
@@ -75,15 +101,15 @@ class AutoTQDeviceProgrammer:
         self.is_connected = False
         self.device_info = {}
         
-        # Transfer speed parameters (instance attributes)
-        self.write_chunk_size = self.WRITE_CHUNK_SIZE
-        self.write_delay = self.WRITE_DELAY
-        self.file_chunk_size = self.FILE_CHUNK_SIZE
+        # Transfer speed parameters (instance attributes for compatibility)
+        self.write_chunk_size = self.SEND_SIZE
+        self.write_delay = self.PIECE_DELAY
+        self.file_chunk_size = self.CHUNK_SIZE
         
-        # Threading for reading responses
-        self.read_thread = None
-        self.stop_reading = False
-        self.response_buffer = []
+        # Threading for reading responses - optimized like JavaScript
+        self.reader_thread: Optional[threading.Thread] = None
+        self.running = False
+        self.device_responses = []
         self.response_lock = threading.Lock()
         
         # Create audio directory
@@ -102,20 +128,36 @@ class AutoTQDeviceProgrammer:
             print("💡 macOS detected - USB devices will appear as /dev/cu.* or /dev/tty.*")
     
     def log(self, message: str, level: str = "INFO"):
-        """Log a message with timestamp and emoji"""
-        timestamp = datetime.now().strftime("%H:%M:%S")
-        emoji_map = {
-            "INFO": "ℹ️ ",
-            "SUCCESS": "✅ ",
-            "WARNING": "⚠️ ",
-            "ERROR": "❌ ",
-            "PROGRESS": "🔄 ",
-            "DEVICE": "📟 ",
-            "TRANSFER": "📤 "
-        }
-        emoji = emoji_map.get(level, "")
-        print(f"[{timestamp}] {emoji} {message}")
-    
+        """Log messages with timestamp like JavaScript."""
+        timestamp = time.strftime("%H:%M:%S")
+        if level == "ERROR":
+            color = Colors.FAIL
+            prefix = "❌"
+        elif level == "WARNING":  
+            color = Colors.WARNING
+            prefix = "⚠️"
+        elif level == "SUCCESS":
+            color = Colors.OKGREEN
+            prefix = "✅"
+        elif level == "TRANSFER":
+            color = Colors.OKCYAN
+            prefix = "📤"
+        elif level == "DEVICE":
+            color = Colors.OKBLUE
+            prefix = "📟"
+        elif level == "PROGRESS":
+            color = Colors.OKCYAN
+            prefix = "🔄"
+        else:
+            color = Colors.OKCYAN
+            prefix = "📱"
+            
+        print(f"{color}[{timestamp}] {prefix} {message}{Colors.ENDC}")
+        
+    def calculate_crc32(self, data: bytes) -> int:
+        """Calculate CRC32 checksum for data integrity verification."""
+        return zlib.crc32(data) & 0xffffffff
+
     def list_available_ports(self) -> List[Tuple[str, str]]:
         """List available serial ports that might be ESP32 devices"""
         ports = []
@@ -129,7 +171,7 @@ class AutoTQDeviceProgrammer:
             
             # Check for common ESP32/Arduino USB vendor/product IDs
             esp32_device_ids = [
-                (0x303A, 0x1001),  # Espressif ESP32-S3
+                (0x303A, 0x1001),  # Espressif ESP32-S3  
                 (0x10C4, 0xEA60),  # Silicon Labs CP2102/CP2109
                 (0x1A86, 0x7523),  # QinHeng Electronics CH340
                 (0x0403, 0x6001),  # FTDI FT232R
@@ -184,7 +226,7 @@ class AutoTQDeviceProgrammer:
                 self.log("💡 Check if device is connected and detected: lsusb | grep -E '(ESP32|CP210|CH340|FT232)'", "INFO")
         
         return ports
-    
+
     def auto_detect_port(self) -> Optional[str]:
         """Auto-detect ESP32 device port with enhanced multi-device support"""
         ports = self.list_available_ports()
@@ -198,143 +240,50 @@ class AutoTQDeviceProgrammer:
             
             # Separate ESP32-specific devices from others
             esp32_ports = [(port, desc) for port, desc in ports if '🎯' in desc]
-            other_ports = [(port, desc) for port, desc in ports if '🎯' not in desc]
             
-            print("\n📟 Available devices:")
-            device_index = 1
-            
-            if esp32_ports:
-                print("  ESP32/AutoTQ devices (recommended):")
-                for port, desc in esp32_ports:
-                    print(f"    {device_index}. {desc}")
-                    device_index += 1
-                
-                if other_ports:
-                    print("  Other USB serial devices:")
-                    for port, desc in other_ports:
-                        print(f"    {device_index}. {desc}")
-                        device_index += 1
+            if len(esp32_ports) == 1:
+                selected_port = esp32_ports[0][0]
+                self.log(f"Auto-selected ESP32-S3 device: {esp32_ports[0][1]}", "SUCCESS")
+                return selected_port
             else:
-                for port, desc in ports:
-                    print(f"  {device_index}. {desc}")
-                    device_index += 1
-            
-            # Smart default suggestion
-            if esp32_ports:
-                suggested = 1
-                print(f"\n💡 Suggestion: Device {suggested} appears to be an ESP32/AutoTQ device")
-            
-            try:
-                choice = input(f"\nEnter device number (1-{len(ports)}): ").strip()
-                
-                # Allow 'auto' to select first ESP32 device
-                if choice.lower() == 'auto' and esp32_ports:
-                    selected_port = esp32_ports[0][0]
-                    self.log(f"Auto-selected ESP32 device: {esp32_ports[0][1]}", "SUCCESS")
-                    return selected_port
-                
-                index = int(choice) - 1
-                if 0 <= index < len(ports):
-                    selected_port = ports[index][0]
-                    self.log(f"Selected device: {ports[index][1]}", "SUCCESS")
-                    return selected_port
-                else:
-                    self.log("Invalid selection", "ERROR")
-                    return None
-            except (ValueError, KeyboardInterrupt):
-                self.log("Selection cancelled", "WARNING")
+                # Multiple ESP32 devices or mixed devices - require manual selection
+                self.log("Multiple compatible devices found - manual selection required", "WARNING")
                 return None
-        
-        return None
-    
+        else:
+            self.log("No compatible devices detected", "ERROR")
+            return None
+
     def connect(self) -> bool:
-        """Connect to the ESP32 device with enhanced platform support"""
-        if self.is_connected:
-            self.log("Already connected", "WARNING")
-            return True
-        
-        # Determine port
+        """Establish serial connection with the device like JavaScript."""
         if not self.port_name:
             self.port_name = self.auto_detect_port()
             if not self.port_name:
-                self.log("No device port specified or detected", "ERROR")
+                self.log("No device port specified and auto-detection failed", "ERROR")
                 return False
-        
+                
         try:
-            self.log(f"Connecting to device on {self.port_name}...")
+            self.log(f"🔗 Connecting to {self.port_name}...")
+            self.serial_port = serial.Serial(self.port_name, **self.SERIAL_PARAMS)
+            time.sleep(2)  # Allow connection to stabilize
             
-            # Platform-specific connection checks
-            current_platform = platform.system().lower()
-            if current_platform == "linux":
-                # Check if port exists
-                if not os.path.exists(self.port_name):
-                    self.log(f"Device {self.port_name} not found. Check if device is connected.", "ERROR")
-                    return False
-                
-                # Check read permissions
-                try:
-                    os.access(self.port_name, os.R_OK | os.W_OK)
-                except PermissionError:
-                    self.log(f"Permission denied accessing {self.port_name}", "ERROR")
-                    self.log("💡 Add user to dialout group: sudo usermod -a -G dialout $USER", "INFO")
-                    self.log("💡 Then logout and login again, or run: newgrp dialout", "INFO")
-                    return False
+            # Start reader thread like JavaScript
+            self.running = True
+            self.reader_thread = threading.Thread(target=self._serial_reader, daemon=True)
+            self.reader_thread.start()
             
-            # Open serial port
-            self.serial_port = serial.Serial(
-                port=self.port_name,
-                baudrate=self.BAUD_RATE,
-                timeout=self.TIMEOUT,
-                write_timeout=self.TIMEOUT
-            )
+            self.is_connected = True
+            self.log(f"✅ Connected to {self.port_name}")
+            return True
             
-            # Wait for device to stabilize
-            self.log("Waiting for device to stabilize...")
-            time.sleep(2.0)
-            
-            # Start reading thread
-            self.stop_reading = False
-            self.read_thread = threading.Thread(target=self._read_loop, daemon=True)
-            self.read_thread.start()
-            
-            # Test communication
-            if self._test_communication():
-                self.is_connected = True
-                self.log("Successfully connected to AutoTQ device", "SUCCESS")
-                return True
-            else:
-                self.log("Device communication test failed", "ERROR")
-                self.log("💡 Make sure the device is in the correct mode and firmware supports USB commands", "INFO")
-                self.disconnect()
-                return False
-                
         except serial.SerialException as e:
-            error_msg = str(e).lower()
-            if "permission denied" in error_msg or "access denied" in error_msg:
-                self.log(f"Permission denied: {e}", "ERROR")
-                if current_platform == "linux":
-                    self.log("💡 Add user to dialout group: sudo usermod -a -G dialout $USER", "INFO")
-                    self.log("💡 Then logout and login again, or run: newgrp dialout", "INFO")
-                elif current_platform == "windows":
-                    self.log("💡 Close any other programs using this COM port", "INFO")
-            elif "device not found" in error_msg or "file not found" in error_msg:
-                self.log(f"Device not found: {e}", "ERROR")
-                self.log("💡 Check if device is connected and try refreshing the port list", "INFO")
-            elif "busy" in error_msg or "in use" in error_msg:
-                self.log(f"Port in use: {e}", "ERROR")
-                self.log("💡 Close any other programs using this port", "INFO")
-            else:
-                self.log(f"Serial connection failed: {e}", "ERROR")
+            self.log(f"Failed to connect to {self.port_name}: {e}", "ERROR")
             return False
-        except Exception as e:
-            self.log(f"Unexpected error during connection: {e}", "ERROR")
-            return False
-    
-    def _read_loop(self):
-        """Background thread to read device responses"""
+            
+    def _serial_reader(self):
+        """Background thread to read serial data like JavaScript readLoop."""
         buffer = ""
         
-        while not self.stop_reading and self.serial_port and self.serial_port.is_open:
+        while self.running and self.serial_port and self.serial_port.is_open:
             try:
                 if self.serial_port.in_waiting > 0:
                     data = self.serial_port.read(self.serial_port.in_waiting).decode('utf-8', errors='ignore')
@@ -344,156 +293,107 @@ class AutoTQDeviceProgrammer:
                     while '\n' in buffer:
                         line, buffer = buffer.split('\n', 1)
                         line = line.strip()
-                        
                         if line:
                             self._process_device_message(line)
-                
-                time.sleep(0.01)  # Small delay to prevent busy waiting
+                                
+                time.sleep(0.01)
                 
             except Exception as e:
-                if not self.stop_reading:
-                    self.log(f"Read error: {e}", "ERROR")
+                if self.running:
+                    self.log(f"Serial read error: {e}", "ERROR")
                 break
-    
-    def _process_device_message(self, message: str):
-        """Process a message received from the device"""
+                
+    def _process_device_message(self, line: str):
+        """Process device messages like JavaScript processDeviceMessage."""
         try:
-            # Try to parse as JSON
-            response = json.loads(message)
-            self.log(f"Device response: {json.dumps(response)}", "DEVICE")
+            response = json.loads(line)
+            self.log(f"📱 Device: {json.dumps(response)}")
             
             with self.response_lock:
-                self.response_buffer.append(response)
-            
-            # Handle specific responses
-            if response.get('command') == 'wifi_get_mac' and 'mac' in response:
-                self.device_info['mac_address'] = response['mac']
-                self.log(f"Device MAC: {response['mac']}", "SUCCESS")
-            elif response.get('command') == 'list_files' and 'files' in response:
-                self.device_info['files'] = response['files']
-                self.log(f"Device has {len(response['files'])} files", "SUCCESS")
-            elif response.get('command') == 'binary_transfer_complete':
-                self.log(f"Transfer complete: {response.get('filename', 'unknown')}", "SUCCESS")
+                self.device_responses.append({
+                    'data': response,
+                    'timestamp': time.time(),
+                    'type': 'json'
+                })
                 
         except json.JSONDecodeError:
-            # Non-JSON message (debug output, etc.)
-            # Filter out verbose debug messages but keep important ones
-            if not any(filter_word in message.lower() for filter_word in 
-                      ['audiotask', 'i2s config', 'audiohdr', 'timing', 'flash dbg']):
-                self.log(f"Device: {message}", "DEVICE")
-    
-    def _test_communication(self) -> bool:
-        """Test communication with the device"""
-        try:
-            # Clear any existing responses
-            with self.response_lock:
-                self.response_buffer.clear()
-            
-            # Send MAC address request
-            self.log("Testing device communication...")
-            if not self._send_command({'command': 'wifi_get_mac'}):
-                return False
-            
-            # Wait for response
-            max_wait = 3.0
-            start_time = time.time()
-            
-            while time.time() - start_time < max_wait:
+            # Non-JSON message - device debug/diagnostic messages
+            if len(line) > 0 and not line.startswith('[Audio') and not line.startswith('[Timing]'):
+                self.log(f"📱 Device: {line}")
+                
                 with self.response_lock:
-                    for response in self.response_buffer:
-                        if response.get('command') == 'wifi_get_mac':
-                            return True
-                time.sleep(0.1)
-            
-            # Try getting status as backup test
-            self.log("MAC request timeout, trying status command...")
-            if not self._send_command({'command': 'get_status'}):
-                return False
-            
-            time.sleep(1.0)  # Give some time for any response
-            return True  # Assume success if no serial errors
-            
-        except Exception as e:
-            self.log(f"Communication test error: {e}", "ERROR")
-            return False
-    
-    def _send_command(self, command: Dict[str, Any]) -> bool:
-        """Send a JSON command to the device"""
+                    self.device_responses.append({
+                        'data': line,
+                        'timestamp': time.time(),
+                        'type': 'text'
+                    })
+
+    def send_command(self, command: Dict[str, Any]) -> bool:
+        """Send JSON command to device like JavaScript sendCommand."""
         if not self.serial_port or not self.serial_port.is_open:
-            self.log("Device not connected", "ERROR")
+            self.log("No serial connection!", "ERROR")
             return False
-        
+            
         try:
-            command_str = json.dumps(command) + '\n'
-            self.serial_port.write(command_str.encode('utf-8'))
-            self.serial_port.flush()
-            self.log(f"Sent command: {json.dumps(command)}")
+            command_json = json.dumps(command) + '\n'
+            self.serial_port.write(command_json.encode('utf-8'))
+            self.log(f"📤 Sent: {json.dumps(command)}")
             return True
         except Exception as e:
             self.log(f"Failed to send command: {e}", "ERROR")
             return False
-    
-    def disconnect(self):
-        """Disconnect from the device"""
-        self.log("Disconnecting from device...")
-        
-        # Stop reading thread
-        self.stop_reading = True
-        if self.read_thread and self.read_thread.is_alive():
-            self.read_thread.join(timeout=1.0)
-        
-        # Close serial port
-        if self.serial_port and self.serial_port.is_open:
-            try:
-                self.serial_port.close()
-            except Exception as e:
-                self.log(f"Error closing serial port: {e}", "WARNING")
-        
-        self.serial_port = None
-        self.is_connected = False
-        self.device_info.clear()
-        
-        self.log("Disconnected", "SUCCESS")
-    
-    def calculate_crc32(self, data: bytes) -> int:
-        """Calculate CRC32 checksum for data integrity"""
-        return zlib.crc32(data) & 0xffffffff
-    
-    def list_device_files(self) -> Optional[List[str]]:
-        """Get list of files on the device"""
-        if not self.is_connected:
-            self.log("Device not connected", "ERROR")
-            return None
-        
-        # Clear previous responses
-        with self.response_lock:
-            self.response_buffer.clear()
-        
-        self.log("Requesting file list from device...")
-        if not self._send_command({'command': 'list_files'}):
-            return None
-        
-        # Wait for response
-        max_wait = 5.0
+
+    def _send_command(self, command: Dict[str, Any]) -> bool:
+        """Compatibility wrapper for send_command"""
+        return self.send_command(command)
+            
+    def wait_for_response(self, response_type: str, timeout: float = 15.0) -> Optional[Dict]:
+        """Wait for specific device response like JavaScript."""
         start_time = time.time()
         
-        while time.time() - start_time < max_wait:
+        while time.time() - start_time < timeout:
             with self.response_lock:
-                for response in self.response_buffer:
-                    if (response.get('command') == 'list_files' and 
-                        response.get('response') == 'file_list' and 
-                        'files' in response):
-                        files = response['files']
-                        self.log(f"Device has {len(files)} files: {files}", "SUCCESS")
-                        return files
+                # Check recent responses
+                for response in self.device_responses[-10:]:
+                    if response['type'] == 'json':
+                        data = response['data']
+                        
+                        if response_type == 'binary_transfer_ready':
+                            if (data.get('command') == 'download_file' and 
+                                data.get('response') == 'binary_transfer_ready'):
+                                return data
+                                
+                        elif response_type == 'chunk_received':
+                            if data.get('response') == 'chunk_received':
+                                return data
+                                
+                        elif response_type == 'binary_transfer_complete':
+                            if data.get('response') == 'binary_transfer_complete':
+                                return data
+                                
+                        elif response_type == 'binary_transfer_aborted':
+                            if data.get('response') == 'binary_transfer_aborted':
+                                return data
+                                
             time.sleep(0.1)
+            
+        return None
+
+    def disconnect(self):
+        """Clean up and disconnect from device."""
+        self.running = False
         
-        self.log("Timeout waiting for file list", "WARNING")
-        return []
-    
+        if self.reader_thread and self.reader_thread.is_alive():
+            self.reader_thread.join(timeout=2)
+            
+        if self.serial_port and self.serial_port.is_open:
+            self.serial_port.close()
+            self.is_connected = False
+            self.log("🔌 Serial connection closed")
+
     def transfer_file_to_device(self, file_path: Path, show_progress: bool = True) -> bool:
         """
-        Transfer a single audio file to the device using optimized settings
+        Transfer a single audio file to the device using optimized JavaScript-style protocol
         """
         if not self.is_connected:
             self.log("Device not connected", "ERROR")
@@ -515,22 +415,38 @@ class AutoTQDeviceProgrammer:
         file_size = len(file_data)
         file_crc = self.calculate_crc32(file_data)
         
-        self.log(f"Starting transfer: {filename} ({file_size:,} bytes, CRC32: {file_crc:08x})", "TRANSFER")
+        self.log(f"📤 Starting binary transfer of {filename}", "TRANSFER")
+        self.log(f"📊 File size: {file_size} bytes ({file_size / 1024:.1f} KB)")
+        self.log(f"🔐 CRC32: 0x{file_crc:08X}")
         
-        # Send initial download command
-        download_cmd = {
+        # Step 1: Send initial download command like JavaScript
+        start_command = {
             "command": "download_file",
             "filename": filename,
             "size": file_size,
-            "chunk_size": 1024,  # Optimal chunk size
-            "crc": file_crc
+            "chunk_size": self.CHUNK_SIZE,
+            "crc32": file_crc
         }
         
-        if not self._send_command(download_cmd):
+        if not self.send_command(start_command):
             return False
+            
+        self.log("✅ Successfully sent download_file command to device")
         
-        # Brief pause for device to process command
-        time.sleep(0.1)
+        # Step 2: Wait for device ready signal like JavaScript
+        self.log("⏳ Waiting for device ready signal...")
+        ready_response = self.wait_for_response('binary_transfer_ready', timeout=10.0)
+        
+        if not ready_response:
+            self.log("❌ Device did not signal ready for binary transfer!", "ERROR")
+            return False
+            
+        self.log("✅ Device ready for binary transfer, sending data...")
+        time.sleep(0.1)  # Small delay like JavaScript
+        
+        # Step 3: Send file in chunks like JavaScript
+        sent_bytes = 0
+        chunk_count = 0
         
         # Setup progress tracking
         if show_progress and HAS_TQDM:
@@ -546,65 +462,96 @@ class AutoTQDeviceProgrammer:
             progress_bar = None
         
         try:
-            bytes_sent = 0
-            chunk_size = 1024  # Optimal chunk size
-            write_size = 64    # Optimal write size
-            
-            while bytes_sent < file_size:
-                # Calculate chunk size
-                remaining = file_size - bytes_sent
-                current_chunk_size = min(chunk_size, remaining)
-                chunk_data = file_data[bytes_sent:bytes_sent + current_chunk_size]
+            while sent_bytes < file_size:
+                current_chunk_size = min(self.CHUNK_SIZE, file_size - sent_bytes)
+                chunk_data = file_data[sent_bytes:sent_bytes + current_chunk_size]
+                chunk_count += 1
                 
-                # Send chunk in small pieces with minimal delays
-                chunk_pos = 0
-                while chunk_pos < len(chunk_data):
-                    piece_size = min(write_size, len(chunk_data) - chunk_pos)
-                    piece = chunk_data[chunk_pos:chunk_pos + piece_size]
-                    
+                self.log(f"📦 Sending chunk {chunk_count}: {current_chunk_size} bytes")
+                
+                # Send chunk in small pieces like JavaScript to avoid buffer overflow
+                for i in range(0, len(chunk_data), self.SEND_SIZE):
+                    piece = chunk_data[i:i + self.SEND_SIZE]
                     try:
-                        self.serial_port.write(piece)
-                        self.serial_port.flush()
-                        chunk_pos += piece_size
-                        
-                        # Minimal delay - optimal for ESP32
-                        time.sleep(0.0001)  # 0.1ms
-                        
+                        bytes_written = self.serial_port.write(piece)
+                        if self.PIECE_DELAY > 0:
+                            time.sleep(self.PIECE_DELAY)
                     except Exception as e:
-                        self.log(f"Write error at position {bytes_sent + chunk_pos}: {e}", "ERROR")
+                        self.log(f"Failed to send data piece: {e}", "ERROR")
                         if progress_bar:
                             progress_bar.close()
                         return False
-                
-                bytes_sent += current_chunk_size
+                        
+                sent_bytes += current_chunk_size
+                percent = round((sent_bytes / file_size) * 100)
                 
                 # Update progress
                 if progress_bar:
                     progress_bar.update(current_chunk_size)
-                elif show_progress:
-                    percent = (bytes_sent / file_size) * 100
-                    print(f"\r🔄 Progress: {percent:.1f}% ({bytes_sent:,}/{file_size:,} bytes)", end='', flush=True)
-            
+                else:
+                    self.log(f"📊 Progress: {percent}% ({sent_bytes}/{file_size} bytes)")
+                
+                # Check for abort signals
+                abort_response = self.wait_for_response('binary_transfer_aborted', timeout=0.1)
+                if abort_response:
+                    reason = abort_response.get('reason', 'Unknown')
+                    self.log(f"❌ Transfer aborted by device: {reason}", "ERROR")
+                    if progress_bar:
+                        progress_bar.close()
+                    return False
+                    
             if progress_bar:
                 progress_bar.close()
-            elif show_progress:
-                print()  # New line after progress
+                
+            self.log("✅ Binary transfer completed, waiting for device processing...")
             
-            # Wait for device to finish
-            time.sleep(0.5)
+            # Step 4: Wait for completion like JavaScript
+            processing_time = max(2.0, min(8.0, file_size / 1024 * 0.1))  # 2-8 seconds based on file size
+            self.log(f"⏳ Allowing {processing_time:.1f}s for device to process file...")
             
-            self.log(f"Transfer completed: {filename}", "SUCCESS")
-            return True
+            # Check for both completion and abort responses
+            start_time = time.time()
+            completion_response = None
+            while time.time() - start_time < processing_time + 5:
+                completion_response = self.wait_for_response('binary_transfer_complete', timeout=0.5)
+                if completion_response:
+                    break
+                    
+                abort_response = self.wait_for_response('binary_transfer_aborted', timeout=0.5)
+                if abort_response:
+                    reason = abort_response.get('reason', 'Unknown')
+                    self.log(f"❌ Transfer aborted by device: {reason}", "ERROR")
+                    return False
             
+            if completion_response:
+                crc_check = completion_response.get('crc_check', None)
+                
+                # Arduino may not send explicit CRC status but still indicate success
+                if crc_check == 'passed':
+                    self.log("✅ CRC verification passed!")
+                    self.log(f"✅ Successfully transferred {filename}", "SUCCESS")
+                    return True
+                elif crc_check == 'failed':
+                    self.log(f"❌ CRC verification failed: {crc_check}", "ERROR")
+                    return False
+                else:
+                    # Arduino sent completion but no explicit CRC status - assume success
+                    self.log("✅ Transfer completed (CRC verification not reported by device)")
+                    self.log(f"✅ Successfully transferred {filename}", "SUCCESS")
+                    return True
+            else:
+                self.log("⚠️ No completion response received within timeout", "WARNING")
+                return False
+                
         except Exception as e:
             if progress_bar:
                 progress_bar.close()
             self.log(f"Transfer failed: {e}", "ERROR")
             return False
-    
+
     def transfer_required_files(self, skip_existing: bool = True) -> Tuple[int, int]:
         """
-        Transfer all required audio files to the device
+        Transfer all required audio files to the device like JavaScript downloadAllAudioFiles
         
         Returns:
             Tuple of (successful_transfers, failed_transfers)
@@ -612,50 +559,75 @@ class AutoTQDeviceProgrammer:
         if not self.is_connected:
             self.log("Device not connected", "ERROR")
             return 0, len(self.REQUIRED_AUDIO_FILES)
+
+        results = {}
+        success_count = 0
+        failure_count = 0
         
-        # Get current device files if checking for existing
-        device_files = []
-        if skip_existing:
-            device_files = self.list_device_files() or []
+        self.log("📥 Starting download of all required audio files...")
+        self.log("🔍 Will transfer files from local storage to device...")
         
-        successful = 0
-        failed = 0
-        
-        self.log(f"Starting transfer of {len(self.REQUIRED_AUDIO_FILES)} required audio files", "TRANSFER")
-        
-        for i, filename in enumerate(self.REQUIRED_AUDIO_FILES, 1):
-            self.log(f"Processing file {i}/{len(self.REQUIRED_AUDIO_FILES)}: {filename}", "PROGRESS")
-            
-            # Check if file already exists on device
-            if skip_existing and filename in device_files:
-                self.log(f"File {filename} already exists on device, skipping", "INFO")
-                successful += 1
-                continue
-            
-            # Find file in audio directory
+        for i, filename in enumerate(self.REQUIRED_AUDIO_FILES):
             file_path = self.audio_dir / filename
             
-            if not file_path.exists():
-                self.log(f"Local file not found: {filename}", "ERROR")
-                failed += 1
-                continue
-            
-            # Transfer file
-            if self.transfer_file_to_device(file_path):
-                successful += 1
-                # Brief pause between files
-                if i < len(self.REQUIRED_AUDIO_FILES):
-                    time.sleep(0.5)
+            if file_path.exists():
+                try:
+                    self.log(f"📥 Processing {filename} ({i + 1}/{len(self.REQUIRED_AUDIO_FILES)})...")
+                    
+                    # Transfer file to device
+                    success = self.transfer_file_to_device(file_path)
+                    results[filename] = success
+                    
+                    if success:
+                        success_count += 1
+                    else:
+                        failure_count += 1
+                        
+                    # Add delay between files like JavaScript
+                    if i < len(self.REQUIRED_AUDIO_FILES) - 1:
+                        self.log("⏸️ Waiting 2 seconds before next file...")
+                        time.sleep(2)
+                        
+                except Exception as e:
+                    self.log(f"❌ Exception during transfer of {filename}: {e}", "ERROR")
+                    results[filename] = False
+                    failure_count += 1
             else:
-                failed += 1
+                self.log(f"❌ {filename} not available locally!", "ERROR")
+                results[filename] = False
+                failure_count += 1
+                
+        # Final status like JavaScript
+        final_message = f"Audio transfer complete: {success_count} succeeded, {failure_count} failed"
+        self.log(final_message, "SUCCESS" if failure_count == 0 else "WARNING")
         
-        # Summary
-        total = len(self.REQUIRED_AUDIO_FILES)
-        self.log(f"Transfer complete: {successful}/{total} succeeded, {failed}/{total} failed", 
-                "SUCCESS" if failed == 0 else "WARNING")
+        return success_count, failure_count
+
+    def list_device_files(self) -> Optional[List[str]]:
+        """Request list of files from device"""
+        if not self.is_connected:
+            return None
+            
+        self.log("🔄 Requesting file list from device...")
+        if self.send_command({"command": "list_files"}):
+            time.sleep(2)  # Allow time for response
+            return []  # Would need to parse device response
+        return None
+
+    def check_local_files(self) -> Tuple[List[str], List[str]]:
+        """Check which required files are available locally"""
+        available = []
+        missing = []
         
-        return successful, failed
-    
+        for filename in self.REQUIRED_AUDIO_FILES:
+            file_path = self.audio_dir / filename
+            if file_path.exists():
+                available.append(filename)
+            else:
+                missing.append(filename)
+        
+        return available, missing
+
     def download_audio_from_server(self, filename: str) -> bool:
         """Download audio file from server to local audio directory"""
         if not HAS_REQUESTS:
@@ -696,314 +668,109 @@ class AutoTQDeviceProgrammer:
         except Exception as e:
             self.log(f"Failed to download {filename}: {e}", "ERROR")
             return False
-    
-    def check_local_files(self) -> Tuple[List[str], List[str]]:
-        """
-        Check which required files are available locally
-        
-        Returns:
-            Tuple of (available_files, missing_files)
-        """
-        available = []
-        missing = []
-        
-        for filename in self.REQUIRED_AUDIO_FILES:
-            file_path = self.audio_dir / filename
-            if file_path.exists():
-                available.append(filename)
-            else:
-                missing.append(filename)
-        
-        return available, missing
-    
-    def interactive_menu(self):
-        """Interactive menu for device operations"""
-        while True:
-            print("\n" + "="*60)
-            print("🎵 AutoTQ Device Programmer")
-            print("="*60)
-            
-            if self.is_connected:
-                mac = self.device_info.get('mac_address', 'Unknown')
-                print(f"📟 Connected to device: {mac} on {self.port_name}")
-            else:
-                print("📟 No device connected")
-                
-                # Show available ports info when not connected
-                ports = self.list_available_ports()
-                if ports:
-                    esp32_count = len([p for p, d in ports if '🎯' in d])
-                    other_count = len(ports) - esp32_count
-                    
-                    if esp32_count > 0:
-                        print(f"📱 Detected {esp32_count} ESP32/AutoTQ device(s)")
-                    if other_count > 0:
-                        print(f"❓ Detected {other_count} other USB serial device(s)")
-                    
-                    if esp32_count > 1:
-                        print("💡 Multiple ESP32 devices detected - will show selection menu on connect")
-                else:
-                    current_platform = platform.system().lower()
-                    print("⚠️  No devices detected")
-                    if current_platform == "linux":
-                        print("💡 Linux: Check permissions and device connection")
-            
-            available_files, missing_files = self.check_local_files()
-            print(f"📁 Local files: {len(available_files)}/{len(self.REQUIRED_AUDIO_FILES)} available")
-            
-            if missing_files:
-                print(f"⚠️  Missing files: {', '.join(missing_files)}")
-            
-            print("\nOptions:")
-            if not self.is_connected:
-                print("  1. Connect to device")
-            else:
-                print("  1. Disconnect from device")
-                print("  2. List files on device")
-                print("  3. Transfer all required files (skip existing)")
-                print("  4. Force transfer all files (overwrite existing)")
-                print("  5. Transfer single file")
-                print("  6. Transfer all files (fast!)")
-                print("  7. Transfer single file (fast transfer)")
-            
-            if missing_files and self.server_url:
-                print("  8. Download missing files from server")
-            
-            print("  l. List available ports")
-            print("  0. Exit")
-            
-            try:
-                choice = input("\nEnter your choice: ").strip()
-                
-                if choice == '0':
-                    break
-                elif choice == '1':
-                    if not self.is_connected:
-                        self.connect()
-                    else:
-                        self.disconnect()
-                elif choice == '2' and self.is_connected:
-                    files = self.list_device_files()
-                    if files:
-                        print(f"\nFiles on device ({len(files)}):")
-                        for f in files:
-                            status = "✅ Required" if f in self.REQUIRED_AUDIO_FILES else "📄 Other"
-                            print(f"  {status} {f}")
-                elif choice == '3' and self.is_connected:
-                    if available_files:
-                        self.transfer_required_files(skip_existing=True)
-                    else:
-                        print("❌ No local audio files available")
-                elif choice == '4' and self.is_connected:
-                    if available_files:
-                        print("🔄 Force transferring all files (will overwrite existing files)...")
-                        self.transfer_required_files(skip_existing=False)
-                    else:
-                        print("❌ No local audio files available")
-                elif choice == '5' and self.is_connected:
-                    if available_files:
-                        print("\nAvailable files:")
-                        for i, f in enumerate(available_files, 1):
-                            print(f"  {i}. {f}")
-                        
-                        try:
-                            file_choice = int(input("Enter file number: ")) - 1
-                            if 0 <= file_choice < len(available_files):
-                                filename = available_files[file_choice]
-                                file_path = self.audio_dir / filename
-                                self.transfer_file_to_device(file_path)
-                        except (ValueError, IndexError):
-                            print("❌ Invalid selection")
-                    else:
-                        print("❌ No local audio files available")
-                elif choice == '6' and self.is_connected:
-                    if available_files:
-                        print("🔄 Fast transfer of all files (faster, waits for device acks)...")
-                        successful = 0
-                        failed = 0
-                        for filename in self.REQUIRED_AUDIO_FILES:
-                            if filename in available_files:
-                                file_path = self.audio_dir / filename
-                                if self.transfer_file_fast(file_path):
-                                    successful += 1
-                                else:
-                                    failed += 1
-                        print(f"✅ Fast transfer complete: {successful} succeeded, {failed} failed")
-                    else:
-                        print("❌ No local audio files available")
-                elif choice == '7' and self.is_connected:
-                    if available_files:
-                        print("\nAvailable files:")
-                        for i, f in enumerate(available_files, 1):
-                            print(f"  {i}. {f}")
-                        
-                        try:
-                            file_choice = int(input("Enter file number: ")) - 1
-                            if 0 <= file_choice < len(available_files):
-                                filename = available_files[file_choice]
-                                file_path = self.audio_dir / filename
-                                self.transfer_file_fast(file_path)
-                        except (ValueError, IndexError):
-                            print("❌ Invalid selection")
-                    else:
-                        print("❌ No local audio files available")
-                elif choice == '8' and missing_files and self.server_url:
-                    print(f"\nDownloading {len(missing_files)} missing files...")
-                    for filename in missing_files:
-                        self.download_audio_from_server(filename)
-                elif choice == 'l':
-                    self.list_available_ports()
-                else:
-                    print("❌ Invalid option or device not connected")
-                    
-            except KeyboardInterrupt:
-                print("\n👋 Goodbye!")
-                break
-            except Exception as e:
-                print(f"❌ Error: {e}")
-    
+
     def set_transfer_speed(self, mode: str = "normal"):
         """
-        Set transfer speed mode
+        Set transfer speed parameters 
         
         Args:
-            mode: "normal", "fast", "ultra", or "ludicrous"
+            mode: "fast", "normal", or "slow"
         """
-        if mode == "normal":
-            self.write_chunk_size = self.WRITE_CHUNK_SIZE  # 64 bytes
-            self.write_delay = self.WRITE_DELAY            # 2ms
-            self.file_chunk_size = self.FILE_CHUNK_SIZE    # 1024 bytes
-            speed_desc = "Normal (64B writes, 2.0ms delay, 1KB chunks)"
-        elif mode == "fast":
-            self.write_chunk_size = 256     # 4x larger writes
-            self.write_delay = 0.001        # 50% faster timing
-            self.file_chunk_size = 2048     # 2x larger chunks
-            speed_desc = "Fast (256B writes, 1.0ms delay, 2KB chunks)"
-        elif mode == "ultra":
-            self.write_chunk_size = 512     # 8x larger writes  
-            self.write_delay = 0.0005       # 75% faster timing
-            self.file_chunk_size = 4096     # 4x larger chunks
-            speed_desc = "Ultra (512B writes, 0.5ms delay, 4KB chunks)"
-        elif mode == "ludicrous":
-            self.write_chunk_size = 1024    # 16x larger writes
-            self.write_delay = 0.0001       # 95% faster timing
-            self.file_chunk_size = 8192     # 8x larger chunks
-            speed_desc = "Ludicrous (1KB writes, 0.1ms delay, 8KB chunks) ⚠️ Experimental!"
+        if mode == "fast":
+            # Moderately fast settings - still reliable
+            self.CHUNK_SIZE = 2048
+            self.SEND_SIZE = 256
+            self.PIECE_DELAY = 0.002
+            self.log("🏭 Production mode: Using moderately fast settings (2KB chunks, 256B pieces, 2ms delay)", "SUCCESS")
+        elif mode == "slow":
+            # Very conservative settings for problematic devices
+            self.CHUNK_SIZE = 512
+            self.SEND_SIZE = 64
+            self.PIECE_DELAY = 0.010
+            self.log("🐌 Conservative mode: Using very slow, ultra-safe transfer settings", "SUCCESS")
         else:
-            self.log(f"Unknown speed mode: {mode}", "ERROR")
-            return
+            # Normal mode - conservative but reasonable
+            self.CHUNK_SIZE = 1024
+            self.SEND_SIZE = 128
+            self.PIECE_DELAY = 0.005
+            self.log("⚖️ Normal mode: Using conservative transfer settings", "SUCCESS")
         
-        self.log(f"Transfer speed set to {mode} mode: {speed_desc}", "SUCCESS")
-    
+        # Update instance attributes for compatibility
+        self.write_chunk_size = self.SEND_SIZE
+        self.write_delay = self.PIECE_DELAY
+        self.file_chunk_size = self.CHUNK_SIZE
+
     def transfer_file_fast(self, file_path: Path, show_progress: bool = True) -> bool:
         """
-        Transfer a file with minimal delays (much faster than original)
-        Uses continuous data flow that the device firmware expects
+        Fast transfer method - compatibility wrapper
         """
+        return self.transfer_file_to_device(file_path, show_progress)
+
+    def interactive_menu(self):
+        """Interactive menu for manual device operations"""
         if not self.is_connected:
-            self.log("Device not connected", "ERROR")
-            return False
-        
-        if not file_path.exists():
-            self.log(f"File not found: {file_path}", "ERROR")
-            return False
-        
-        # Read file data
-        try:
-            with open(file_path, 'rb') as f:
-                file_data = f.read()
-        except Exception as e:
-            self.log(f"Failed to read file {file_path}: {e}", "ERROR")
-            return False
-        
-        filename = file_path.name
-        file_size = len(file_data)
-        file_crc = self.calculate_crc32(file_data)
-        
-        self.log(f"Starting fast transfer: {filename} ({file_size:,} bytes, CRC32: {file_crc:08x})", "TRANSFER")
-        
-        # Send initial download command
-        download_cmd = {
-            "command": "download_file",
-            "filename": filename,
-            "size": file_size,
-            "chunk_size": self.file_chunk_size,
-            "crc": file_crc
-        }
-        
-        if not self._send_command(download_cmd):
-            return False
-        
-        # Brief pause for device to process command
-        time.sleep(0.1)
-        
-        # Setup progress tracking
-        if show_progress and HAS_TQDM:
-            progress_bar = tqdm(
-                total=file_size,
-                desc=f"Transferring {filename} (fast)",
-                unit='B',
-                unit_scale=True,
-                unit_divisor=1024,
-                ncols=80
-            )
-        else:
-            progress_bar = None
-        
-        try:
-            bytes_sent = 0
+            self.log("Not connected to device", "ERROR")
+            return
             
-            while bytes_sent < file_size:
-                # Calculate chunk size
-                remaining = file_size - bytes_sent
-                chunk_size = min(self.file_chunk_size, remaining)
-                chunk_data = file_data[bytes_sent:bytes_sent + chunk_size]
+        while True:
+            print(f"\n{Colors.WARNING}🎯 Available Operations:{Colors.ENDC}")
+            print("1. 📥 Transfer all required files")
+            print("2. 📁 Transfer specific file")
+            print("3. 📋 Request device file list")
+            print("4. 🔍 Request missing audio files")
+            print("5. 🏓 Test device communication")
+            print("6. 🚪 Exit")
+            
+            try:
+                choice = input(f"\n{Colors.OKCYAN}Select operation (1-6): {Colors.ENDC}").strip()
                 
-                # Send chunk in small pieces with minimal delays
-                chunk_pos = 0
-                while chunk_pos < len(chunk_data):
-                    piece_size = min(self.write_chunk_size, len(chunk_data) - chunk_pos)
-                    piece = chunk_data[chunk_pos:chunk_pos + piece_size]
+                if choice == '1':
+                    self.transfer_required_files(skip_existing=False)
                     
+                elif choice == '2':
+                    available, missing = self.check_local_files()
+                    if not available:
+                        print(f"{Colors.FAIL}No audio files found locally!{Colors.ENDC}")
+                        continue
+                        
+                    print(f"\n{Colors.WARNING}📂 Available files:{Colors.ENDC}")
+                    for i, filename in enumerate(available):
+                        print(f"  {i+1}. {filename}")
+                        
                     try:
-                        self.serial_port.write(piece)
-                        self.serial_port.flush()
-                        chunk_pos += piece_size
+                        file_choice = int(input("Select file number: ")) - 1
+                        if 0 <= file_choice < len(available):
+                            filename = available[file_choice]
+                            file_path = self.audio_dir / filename
+                            self.transfer_file_to_device(file_path)
+                        else:
+                            print(f"{Colors.FAIL}Invalid file selection!{Colors.ENDC}")
+                    except ValueError:
+                        print(f"{Colors.FAIL}Invalid input!{Colors.ENDC}")
                         
-                        # Minimal delay - just enough for device to process
-                        time.sleep(0.0001)  # 0.1ms instead of 2ms (20x faster!)
-                        
-                    except Exception as e:
-                        self.log(f"Write error at position {bytes_sent + chunk_pos}: {e}", "ERROR")
-                        if progress_bar:
-                            progress_bar.close()
-                        return False
-                
-                bytes_sent += chunk_size
-                
-                # Update progress
-                if progress_bar:
-                    progress_bar.update(chunk_size)
-                elif show_progress:
-                    percent = (bytes_sent / file_size) * 100
-                    print(f"\r🔄 Progress: {percent:.1f}% ({bytes_sent:,}/{file_size:,} bytes)", end='', flush=True)
-            
-            if progress_bar:
-                progress_bar.close()
-            elif show_progress:
-                print()  # New line after progress
-            
-            # Wait a moment for device to finish processing
-            time.sleep(0.5)
-            
-            self.log(f"Fast transfer completed: {filename}", "SUCCESS")
-            return True
-            
-        except Exception as e:
-            if progress_bar:
-                progress_bar.close()
-            self.log(f"Transfer failed: {e}", "ERROR")
-            return False
+                elif choice == '3':
+                    self.list_device_files()
+                    
+                elif choice == '4':
+                    self.send_command({"command": "list_missing_audio"})
+                    time.sleep(2)  # Allow time for response
+                    
+                elif choice == '5':
+                    test_command = {"command": "ping", "timestamp": int(time.time())}
+                    self.send_command(test_command)
+                    time.sleep(1)
+                    
+                elif choice == '6':
+                    break
+                    
+                else:
+                    print(f"{Colors.FAIL}Invalid choice!{Colors.ENDC}")
+                    
+            except KeyboardInterrupt:
+                print(f"\n{Colors.WARNING}Operation interrupted by user.{Colors.ENDC}")
+                break
+            except Exception as e:
+                print(f"{Colors.FAIL}Error: {e}{Colors.ENDC}")
 
 
 def main():
@@ -1013,151 +780,93 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  python autotq_device_programmer.py                          # Interactive mode
-  python autotq_device_programmer.py --port COM3              # Specific port (Windows)
-  python autotq_device_programmer.py --port /dev/ttyUSB0      # Specific port (Linux)
-  python autotq_device_programmer.py --transfer-all           # Auto-transfer all files
-  python autotq_device_programmer.py --transfer-all --force   # Force re-transfer all files
-  python autotq_device_programmer.py --transfer-all --fast    # Fast transfer mode
-  python autotq_device_programmer.py --ultra                  # Enable ultra-fast mode
-  python autotq_device_programmer.py --list-ports             # List available ports
-  python autotq_device_programmer.py --audio-dir ./downloads  # Custom audio directory
+  python autotq_device_programmer.py                          # Auto-detect device and run interactive menu
+  python autotq_device_programmer.py --port COM3              # Use specific COM port
+  python autotq_device_programmer.py --transfer-all           # Auto-transfer all required files
+  python autotq_device_programmer.py --audio-dir ./audio      # Use custom audio directory
+  python autotq_device_programmer.py --list-ports             # Show available serial ports
 
-Linux users:
-  Make sure you're in the dialout group: sudo usermod -a -G dialout $USER
-  Then logout and login again, or run: newgrp dialout
-  Check connected devices: lsusb | grep -E '(ESP32|CP210|CH340|FT232)'
+Transfer Modes:
+  --fast                                                       # Use fastest transfer settings
+  --normal                                                     # Use balanced settings (default)
+  --slow                                                       # Use conservative settings
         """
     )
     
-    parser.add_argument("--port", help="Serial port (e.g., COM3, /dev/ttyUSB0)")
-    parser.add_argument("--audio-dir", default="audio", 
-                       help="Directory containing audio files (default: audio)")
-    parser.add_argument("--server-url", 
-                       help="Server URL to download audio files from")
+    parser.add_argument("--port", "-p", 
+                       help="Serial port (e.g., COM3, /dev/ttyUSB0)")
+    parser.add_argument("--audio-dir", "-a", default="audio",
+                       help="Directory containing audio files (default: ./audio)")
+    parser.add_argument("--server-url", "-s",
+                       help="Server URL for downloading audio files")
     parser.add_argument("--transfer-all", action="store_true",
-                       help="Connect and transfer all required files automatically")
-    parser.add_argument("--force", action="store_true",
-                       help="Force transfer files even if they already exist on device")
-    parser.add_argument("--fast", action="store_true",
-                       help="Enable fast transfer mode (larger chunks, reduced delays)")
-    parser.add_argument("--ultra", action="store_true", 
-                       help="Enable ultra-fast transfer mode (maximum speed, may be unstable)")
-    parser.add_argument("--ludicrous", action="store_true",
-                       help="Enable ludicrous speed mode (experimental, maximum performance)")
-    parser.add_argument("--response-based", action="store_true",
-                       help="Use response-based flow control (wait for device acks instead of delays)")
+                       help="Automatically transfer all required files and exit")
     parser.add_argument("--list-ports", action="store_true",
                        help="List available serial ports and exit")
-    parser.add_argument("--no-progress", action="store_true",
-                       help="Disable progress bars")
+    parser.add_argument("--fast", action="store_true",
+                       help="Use fastest transfer settings")
+    parser.add_argument("--slow", action="store_true",
+                       help="Use slowest/safest transfer settings")
     
     args = parser.parse_args()
     
-    # List ports and exit
     if args.list_ports:
-        print("🔍 Scanning for available AutoTQ/ESP32 devices...")
         programmer = AutoTQDeviceProgrammer()
         ports = programmer.list_available_ports()
-        
         if ports:
-            current_platform = platform.system().lower()
-            print(f"\n📟 Available serial ports ({current_platform}):")
-            
-            esp32_ports = [(port, desc) for port, desc in ports if '🎯' in desc]
-            other_ports = [(port, desc) for port, desc in ports if '🎯' not in desc]
-            
-            if esp32_ports:
-                print("\n  ESP32/AutoTQ devices (recommended):")
-                for port, desc in esp32_ports:
-                    print(f"    {desc}")
-            
-            if other_ports:
-                print("\n  Other USB serial devices:")
-                for port, desc in other_ports:
-                    print(f"    {desc}")
-            
-            print(f"\n💡 Use --port <device> to specify a particular device")
-            if current_platform == "linux":
-                print("💡 On Linux, ensure you're in the dialout group for access")
+            print("\n📟 Available serial ports:")
+            for port, desc in ports:
+                print(f"  {desc}")
         else:
-            print("\n❌ No serial ports found")
-            if platform.system().lower() == "linux":
-                print("💡 Check if device is connected: lsusb | grep -E '(ESP32|CP210|CH340|FT232)'")
-                print("💡 Ensure user permissions: sudo usermod -a -G dialout $USER")
-        return
-    
-    # Validate arguments - remove the firmware_only and audio_only validation
-    if args.fast and args.ultra:
-        print("❌ Cannot specify both --fast and --ultra")
-        sys.exit(1)
-    
-    # Disable tqdm if requested
-    if args.no_progress:
-        global HAS_TQDM
-        HAS_TQDM = False
-    
-    # Determine speed mode
-    speed_mode = "normal"
-    if args.ultra:
-        speed_mode = "ultra"
-    elif args.fast:
-        speed_mode = "fast"
-    
-    # Initialize programmer
-    programmer = AutoTQDeviceProgrammer(
-        port=args.port,
-        audio_dir=args.audio_dir,
-        server_url=args.server_url
-    )
-    
-    # Set speed mode if ultra was requested
-    if speed_mode != "normal":
-        programmer.set_transfer_speed(speed_mode)
+            print("❌ No compatible devices found")
+        return 0
     
     try:
-        if args.transfer_all:
-            # Automatic mode
-            if programmer.connect():
-                available, missing = programmer.check_local_files()
-                if available:
-                    # Use force flag to determine whether to skip existing files
-                    skip_existing = not args.force
-                    if args.force:
-                        programmer.log("Force mode enabled - will overwrite existing files", "WARNING")
-                    
-                    # Use response-based transfer if requested
-                    if args.response_based:
-                        programmer.log("Using response-based transfer (faster!)", "SUCCESS")
-                        successful = 0
-                        failed = 0
-                        for filename in programmer.REQUIRED_AUDIO_FILES:
-                            if filename in available:
-                                file_path = programmer.audio_dir / filename
-                                if programmer.transfer_file_fast(file_path):
-                                    successful += 1
-                                else:
-                                    failed += 1
-                        programmer.log(f"Fast transfer complete: {successful} succeeded, {failed} failed", 
-                                     "SUCCESS" if failed == 0 else "WARNING")
-                    else:
-                        programmer.transfer_required_files(skip_existing=skip_existing)
+        # Initialize programmer
+        programmer = AutoTQDeviceProgrammer(
+            port=args.port,
+            audio_dir=args.audio_dir,
+            server_url=args.server_url
+        )
+        
+        # Set transfer speed
+        if args.fast:
+            programmer.set_transfer_speed("fast")
+        elif args.slow:
+            programmer.set_transfer_speed("slow")
+        
+        # Connect to device
+        if not programmer.connect():
+            print(f"{Colors.FAIL}❌ Failed to connect to device{Colors.ENDC}")
+            return 1
+        
+        try:
+            if args.transfer_all:
+                # Auto-transfer mode
+                successful, failed = programmer.transfer_required_files(skip_existing=False)
+                if failed == 0:
+                    print(f"{Colors.OKGREEN}✅ All files transferred successfully!{Colors.ENDC}")
+                    return 0
                 else:
-                    programmer.log("No local audio files found", "ERROR")
-                programmer.disconnect()
+                    print(f"{Colors.FAIL}❌ {failed} files failed to transfer{Colors.ENDC}")
+                    return 1
             else:
-                programmer.log("Failed to connect to device", "ERROR")
-                sys.exit(1)
-        else:
-            # Interactive mode
-            programmer.interactive_menu()
-    
-    except KeyboardInterrupt:
-        programmer.log("Operation cancelled by user", "WARNING")
-    finally:
-        if programmer.is_connected:
+                # Interactive mode
+                print(f"\n{Colors.HEADER}🎵 AutoTQ Device Programmer - Interactive Mode{Colors.ENDC}")
+                programmer.interactive_menu()
+                
+        finally:
             programmer.disconnect()
+            
+        return 0
+        
+    except KeyboardInterrupt:
+        print(f"\n{Colors.WARNING}⚠️ Program interrupted by user{Colors.ENDC}")
+        return 1
+    except Exception as e:
+        print(f"{Colors.FAIL}❌ Unexpected error: {e}{Colors.ENDC}")
+        return 1
 
 
 if __name__ == "__main__":
-    main() 
+    sys.exit(main()) 

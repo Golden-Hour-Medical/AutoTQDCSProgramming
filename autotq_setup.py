@@ -791,10 +791,10 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  python autotq_setup.py                           # Download everything from production server
+  python autotq_setup.py                           # Download everything (re-downloads existing files)
+  python autotq_setup.py --skip-existing           # Skip files that already exist locally
   python autotq_setup.py --firmware-only           # Only download firmware
   python autotq_setup.py --audio-only              # Only download audio files
-  python autotq_setup.py --force                   # Re-download existing files
   python autotq_setup.py --output-dir ./downloads  # Custom output directory
   python autotq_setup.py --username admin          # Pre-specify username
   python autotq_setup.py --url https://localhost:8000 --no-ssl-verify  # Use local development server
@@ -818,8 +818,10 @@ Platform notes:
     parser.add_argument("--password", help="Password for login")
     parser.add_argument("--output-dir", default=".",
                        help="Directory to download files to (default: current directory)")
-    parser.add_argument("--force", action="store_true",
-                       help="Re-download files even if they already exist")
+    parser.add_argument("--skip-existing", action="store_true",
+                       help="Skip downloading files that already exist (default: re-download all files)")
+    parser.add_argument("--force", action="store_true", 
+                       help="DEPRECATED: Re-download is now the default behavior. Use --skip-existing to skip files.")
     parser.add_argument("--firmware-only", action="store_true",
                        help="Only download firmware files")
     parser.add_argument("--audio-only", action="store_true",
@@ -839,6 +841,11 @@ Platform notes:
         global HAS_TQDM
         HAS_TQDM = False
     
+    # Handle deprecated --force flag
+    if args.force:
+        print("⚠️  Warning: --force flag is deprecated. Re-download is now the default behavior.")
+        print("💡 Use --skip-existing if you want to skip files that already exist.")
+    
     # Initialize setup tool
     setup = AutoTQSetup(
         base_url=args.url,
@@ -851,7 +858,7 @@ Platform notes:
         success = setup.run_setup(
             username=args.username,
             password=args.password,
-            force=args.force,
+            force=not args.skip_existing,
             firmware_only=args.firmware_only,
             audio_only=args.audio_only
         )

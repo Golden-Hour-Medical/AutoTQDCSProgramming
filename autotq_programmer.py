@@ -131,12 +131,10 @@ class AutoTQProgrammer:
     
     def configure_production_audio_settings(self):
         """Configure optimized audio transfer settings for production mode"""
-        # Production-optimized settings for fastest transfer
-        self.device_programmer.write_chunk_size = 256    # Optimal for ESP32-S3
-        self.device_programmer.write_delay = 0.001       # 1ms - fastest stable delay
-        self.device_programmer.file_chunk_size = 2048    # 2KB chunks for efficiency
+        # Use our proven fast settings from the optimized implementation
+        self.device_programmer.set_transfer_speed("fast")
         
-        self.log("🏭 Production audio settings: 256B writes, 1ms delay, 2KB chunks", "SUCCESS")
+        self.log("🏭 Production audio settings: Optimized JavaScript-style transfer enabled", "SUCCESS")
     
     def program_device_complete(self, port: str = None, production_mode: bool = True) -> bool:
         """
