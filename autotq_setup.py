@@ -62,7 +62,8 @@ class AutoTQSetup:
         self.firmware_dir = self.output_dir / "firmware"
         self.audio_dir = self.output_dir / "audio"
         self.manifest_file = self.output_dir / "autotq_manifest.json"
-        self.credentials_file = self.output_dir / ".autotq_credentials"
+        self.credentials_file = self.output_dir / ".autotq_credentials"  # legacy (username/password)
+        self.api_key_file = self.output_dir / ".autotq_api_key"
         self.lock_file = self.output_dir / "autotq_setup.lock"
         
         # Platform detection
@@ -93,6 +94,22 @@ class AutoTQSetup:
         self.log("\nReceived interrupt signal, cleaning up...", "WARNING")
         self.release_lock()
         sys.exit(1)
+    
+    # -------- API helpers: try /api/v1 first, then legacy path --------
+    def _api_request(self, method: str, path: str, **kwargs):
+        base = self.client.base_url.rstrip('/')
+        normalized = '/' + path.lstrip('/')
+        v1 = f"{base}/api/v1{normalized}"
+        try:
+            r = self.client.session.request(method.upper(), v1, **kwargs)
+            if r.status_code != 404:
+                return r
+        except Exception:
+            pass
+        return self.client.session.request(method.upper(), f"{base}{normalized}", **kwargs)
+    
+    def _api_get(self, path: str, **kwargs):
+        return self._api_request('GET', path, **kwargs)
     
     def check_system_requirements(self) -> bool:
         """Check system requirements and dependencies"""
@@ -321,6 +338,52 @@ class AutoTQSetup:
         except Exception as e:
             self.log(f"Could not save credentials: {e}", "WARNING")
             return False
+
+    def save_api_key(self, api_key: str) -> bool:
+        """Securely save API key for future use"""
+        if not HAS_CRYPTO:
+            self.log("Cryptography not available, cannot save API key", "WARNING")
+            return False
+        try:
+            try:
+                if self.current_platform == "windows":
+                    user = os.environ.get('USERNAME') or os.environ.get('USER') or 'default'
+                else:
+                    user = os.getlogin()
+            except OSError:
+                user = os.environ.get('USER') or os.environ.get('USERNAME') or 'default'
+
+            system_info = f"{user}-{platform.node()}-autotq"
+            key = self._get_encryption_key(system_info)
+            fernet = Fernet(key)
+
+            payload = {
+                'api_key': api_key,
+                'saved_at': datetime.now().isoformat(),
+                'platform': self.current_platform
+            }
+            encrypted_data = fernet.encrypt(json.dumps(payload).encode())
+
+            with open(self.api_key_file, 'wb') as f:
+                f.write(encrypted_data)
+
+            if self.current_platform != "windows":
+                try:
+                    os.chmod(self.api_key_file, 0o600)
+                except Exception as e:
+                    self.log(f"Could not set file permissions: {e}", "WARNING")
+            else:
+                try:
+                    import subprocess
+                    subprocess.run(["attrib", "+H", str(self.api_key_file)], capture_output=True, check=False)
+                except Exception:
+                    pass
+
+            self.log("API key saved securely", "SUCCESS")
+            return True
+        except Exception as e:
+            self.log(f"Could not save API key: {e}", "WARNING")
+            return False
     
     def load_credentials(self) -> Optional[tuple]:
         """Load saved credentials"""
@@ -352,6 +415,32 @@ class AutoTQSetup:
             
         except Exception as e:
             self.log(f"Could not load saved credentials: {e}", "WARNING")
+            return None
+
+    def load_api_key(self) -> Optional[str]:
+        """Load saved API key"""
+        if not HAS_CRYPTO or not self.api_key_file.exists():
+            return None
+        try:
+            try:
+                if self.current_platform == "windows":
+                    user = os.environ.get('USERNAME') or os.environ.get('USER') or 'default'
+                else:
+                    user = os.getlogin()
+            except OSError:
+                user = os.environ.get('USER') or os.environ.get('USERNAME') or 'default'
+
+            system_info = f"{user}-{platform.node()}-autotq"
+            key = self._get_encryption_key(system_info)
+            fernet = Fernet(key)
+
+            with open(self.api_key_file, 'rb') as f:
+                encrypted_data = f.read()
+            decrypted = fernet.decrypt(encrypted_data)
+            payload = json.loads(decrypted.decode())
+            return payload.get('api_key')
+        except Exception as e:
+            self.log(f"Could not load saved API key: {e}", "WARNING")
             return None
     
     def log(self, message: str, level: str = "INFO"):
@@ -396,51 +485,47 @@ class AutoTQSetup:
         except Exception as e:
             self.log(f"Could not save manifest: {e}", "ERROR")
     
-    def authenticate(self, username: str = None, password: str = None) -> bool:
-        """Authenticate with the server"""
+    def authenticate(self, api_key: str = None) -> bool:
+        """Authenticate with the server using API key."""
         self.log("Starting authentication process", "INFO")
         
-        # Check if already authenticated
-        if self.client.is_authenticated():
-            user_info = self.client.get_user_profile()
-            if user_info:
-                self.log(f"Already authenticated as {user_info.get('username')}", "SUCCESS")
-                return True
-        
-        # Try to use provided credentials first
-        if username and password:
-            success = self.client.login(username, password)
-            if success:
+        # If there's already a valid session, we're done
+        user_info = self.client.get_user_profile()
+        if user_info:
+            self.log(f"Already authenticated as {user_info.get('username')}", "SUCCESS")
+            return True
+
+        # Use provided API key first
+        if api_key:
+            if self.client.set_api_key(api_key, prompt_if_missing=False):
+                self.save_api_key(api_key)
                 self.log("Authentication successful", "SUCCESS")
-                # Save credentials for future use
-                self.save_credentials(username, password)
                 return True
-        
-        # Try to load saved credentials
-        saved_creds = self.load_credentials()
-        if saved_creds:
-            username, password = saved_creds
-            self.log("Using saved credentials", "INFO")
-            success = self.client.login(username, password)
-            if success:
-                self.log("Authentication successful with saved credentials", "SUCCESS")
+            self.log("Provided API key is invalid", "WARNING")
+
+        # Try to load saved API key
+        saved_key = self.load_api_key()
+        if saved_key:
+            self.log("Using saved API key", "INFO")
+            if self.client.set_api_key(saved_key, prompt_if_missing=False):
+                self.log("Authentication successful with saved API key", "SUCCESS")
                 return True
             else:
-                self.log("Saved credentials are invalid, removing them", "WARNING")
+                self.log("Saved API key is invalid, removing it", "WARNING")
                 try:
-                    self.credentials_file.unlink()
-                except:
+                    self.api_key_file.unlink()
+                except Exception:
                     pass
-        
-        # If all else fails, prompt for credentials
-        if not username:
-            success = self.client.login()  # This will prompt
-            if success:
-                # Try to save the credentials that were just entered
-                # Note: We can't save them here because client.login() doesn't return the password
-                self.log("Authentication successful", "SUCCESS")
-                return True
-        
+
+        # Prompt user for API key
+        self.log("API key required. It will be stored securely on this machine.", "INFO")
+        if self.client.set_api_key(prompt_if_missing=True):
+            # Persist the key the user entered
+            if 'X-API-Key' in self.client.session.headers:
+                self.save_api_key(self.client.session.headers['X-API-Key'])
+            self.log("Authentication successful", "SUCCESS")
+            return True
+
         self.log("Authentication failed", "ERROR")
         return False
     
@@ -448,10 +533,7 @@ class AutoTQSetup:
         """Get the latest firmware version info"""
         try:
             self.log("Fetching firmware versions list", "PROGRESS")
-            response = self.client.session.get(
-                f"{self.client.base_url}/firmware/versions?limit=1&skip=0",
-                timeout=30
-            )
+            response = self._api_get("/firmware/versions", params={"limit": 1, "skip": 0}, timeout=30)
             
             if response.status_code == 200:
                 versions = response.json()
@@ -580,7 +662,12 @@ class AutoTQSetup:
             return True
         
         # Download the firmware with progress bar
-        url = f"{self.client.base_url}/firmware/versions/{firmware_id}/binary"
+        # Build streaming URL preferring versioned path
+        probe = self._api_get(f"/firmware/versions/{firmware_id}/binary", timeout=5)
+        if probe is not None and getattr(probe, 'url', None):
+            url = probe.url
+        else:
+            url = f"{self.client.base_url.rstrip('/')}/api/v1/firmware/versions/{firmware_id}/binary"
         success = self.download_with_progress(
             url, 
             firmware_file, 
@@ -598,10 +685,7 @@ class AutoTQSetup:
         try:
             manifest_file = version_dir / f"manifest_v{version_number}.json"
             
-            response = self.client.session.get(
-                f"{self.client.base_url}/firmware/versions/{firmware_id}/manifest",
-                timeout=30
-            )
+            response = self._api_get(f"/firmware/versions/{firmware_id}/manifest", timeout=30)
             
             if response.status_code == 200:
                 with open(manifest_file, 'w') as f:
@@ -617,10 +701,7 @@ class AutoTQSetup:
         """Get list of available audio files"""
         try:
             self.log("Fetching audio files list", "PROGRESS")
-            response = self.client.session.get(
-                f"{self.client.base_url}/audio/files",
-                timeout=30
-            )
+            response = self._api_get("/audio/files", timeout=30)
             
             if response.status_code == 200:
                 files = response.json()
@@ -644,7 +725,14 @@ class AutoTQSetup:
             return True
         
         # Download with progress bar
-        url = f"{self.client.base_url}/audio/file/{filename}"
+        # Prefer versioned path but download_with_progress needs a full URL; build via helper check
+        # Try /api/v1 first to determine availability
+        test_resp = self._api_get(f"/audio/file/{filename}", timeout=5)
+        if test_resp is not None and getattr(test_resp, 'url', None):
+            # requests.Response.url is the actual requested URL; use it directly for streaming
+            url = test_resp.url
+        else:
+            url = f"{self.client.base_url.rstrip('/')}/api/v1/audio/file/{filename}"
         return self.download_with_progress(url, audio_file, f"Audio: {filename}")
     
     def download_all_audio_files(self, force: bool = False) -> bool:
@@ -673,7 +761,7 @@ class AutoTQSetup:
             self.log(f"Downloaded {success_count}/{total_count} audio files", "WARNING")
             return False
     
-    def run_setup(self, username: str = None, password: str = None, force: bool = False, 
+    def run_setup(self, api_key: str = None, force: bool = False, 
                   firmware_only: bool = False, audio_only: bool = False) -> bool:
         """Run the complete setup process"""
         start_time = datetime.now()
@@ -703,7 +791,7 @@ class AutoTQSetup:
             manifest = self.load_manifest()
             
             # Authenticate
-            if not self.authenticate(username, password):
+            if not self.authenticate(api_key):
                 self.log("Setup failed: Authentication required", "ERROR")
                 return False
             
@@ -814,8 +902,7 @@ Platform notes:
                        help="Server URL (default: https://seahorse-app-ax33h.ondigitalocean.app)")
     parser.add_argument("--no-ssl-verify", action="store_true",
                        help="Disable SSL certificate verification (for local development)")
-    parser.add_argument("--username", help="Username for login")
-    parser.add_argument("--password", help="Password for login")
+    parser.add_argument("--api-key", help="API key for authentication (X-API-Key header)")
     parser.add_argument("--output-dir", default=".",
                        help="Directory to download files to (default: current directory)")
     parser.add_argument("--skip-existing", action="store_true",
@@ -856,8 +943,7 @@ Platform notes:
     # Run setup
     try:
         success = setup.run_setup(
-            username=args.username,
-            password=args.password,
+            api_key=args.api_key,
             force=not args.skip_existing,
             firmware_only=args.firmware_only,
             audio_only=args.audio_only

@@ -25,172 +25,155 @@ class AutoTQClient:
         """
         self.base_url = base_url or "https://localhost:8000"
         self.verify_ssl = verify_ssl
-        self.token = None
-        self.token_type = "bearer"
+        self.api_key: Optional[str] = None
+        # Back-compat attribute so legacy callers don't crash
+        self.token: Optional[str] = None
         self.session = requests.Session()
         self.session.verify = verify_ssl
         
-        # Load existing token if available
-        self._load_token()
+        # Load existing API key if available (backward-compatible read)
+        self._load_api_key()
     
-    def _load_token(self) -> None:
-        """Load authentication token from file if it exists"""
-        token_file = "autotq_token.json"
-        if os.path.exists(token_file):
+    def _load_api_key(self) -> None:
+        """Load API key from common locations. Prefer JSON; fall back to plaintext."""
+        candidates = []
+        # Project directory
+        candidates.append(("autotq_token.json", "json"))
+        candidates.append((".autotq_api_key", "text"))
+        # Home directory
+        home = os.path.expanduser("~")
+        if home and os.path.isdir(home):
+            candidates.append((os.path.join(home, ".autotq_token.json"), "json"))
+            candidates.append((os.path.join(home, ".autotq_api_key"), "text"))
+            candidates.append((os.path.join(home, ".autotq", "autotq_token.json"), "json"))
+            candidates.append((os.path.join(home, ".autotq", "api_key.txt"), "text"))
+        # APPDATA on Windows
+        appdata = os.environ.get("APPDATA")
+        if appdata:
+            candidates.append((os.path.join(appdata, "AutoTQ", "autotq_token.json"), "json"))
+            candidates.append((os.path.join(appdata, "AutoTQ", "api_key.txt"), "text"))
+
+        for path, kind in candidates:
             try:
-                with open(token_file, 'r') as f:
+                if kind == "json" and os.path.exists(path):
+                    with open(path, 'r') as f:
+                        data = json.load(f)
+                        api_key = data.get('api_key')
+                        if api_key:
+                            self.api_key = api_key
+                            self.session.headers.update({'X-API-Key': self.api_key})
+                            print(f"📝 Loaded existing API key from {path}")
+                            return
+                        # silently ignore legacy bearer-only files; try next candidate
+                elif kind == "text" and os.path.exists(path):
+                    with open(path, 'r') as f:
+                        api_key = (f.read() or "").strip()
+                        if api_key:
+                            self.api_key = api_key
+                            self.session.headers.update({'X-API-Key': self.api_key})
+                            print(f"📝 Loaded existing API key from {path}")
+                            return
+            except Exception:
+                # Ignore errors and continue to next candidate
+                continue
+        # If we get here and a legacy token exists in project token, print a one-time note
+        try:
+            proj_token = "autotq_token.json"
+            if os.path.exists(proj_token):
+                with open(proj_token, 'r') as f:
                     data = json.load(f)
-                    self.token = data.get('access_token')
-                    self.token_type = data.get('token_type', 'bearer')
-                    if self.token:
-                        self.session.headers.update({
-                            'Authorization': f'{self.token_type.title()} {self.token}'
-                        })
-                        print("📝 Loaded existing authentication token")
+                    if data.get('access_token') and not data.get('api_key'):
+                        print("ℹ️  Legacy bearer token found but API now uses X-API-Key. Please provide an API key.")
+        except Exception:
+            pass
+
+    def _save_api_key(self, api_key: str) -> None:
+        """Persist API key to JSON and plaintext in best-available writable location."""
+        payload = {"api_key": api_key, "saved_at": datetime.utcnow().isoformat() + "Z"}
+        tried = []
+        # Preference order: project dir, ~/.autotq, %APPDATA%/AutoTQ
+        targets = []
+        targets.append(("autotq_token.json", ".autotq_api_key"))
+        home = os.path.expanduser("~")
+        if home and os.path.isdir(home):
+            homedir = os.path.join(home, ".autotq")
+            targets.append((os.path.join(home, ".autotq_token.json"), os.path.join(home, ".autotq_api_key")))
+            targets.append((os.path.join(homedir, "autotq_token.json"), os.path.join(homedir, "api_key.txt")))
+        appdata = os.environ.get("APPDATA")
+        if appdata:
+            appdir = os.path.join(appdata, "AutoTQ")
+            targets.append((os.path.join(appdir, "autotq_token.json"), os.path.join(appdir, "api_key.txt")))
+
+        saved_any = False
+        for json_path, key_path in targets:
+            try:
+                # ensure directory exists
+                jd = os.path.dirname(json_path)
+                kd = os.path.dirname(key_path)
+                if jd and not os.path.exists(jd):
+                    os.makedirs(jd, exist_ok=True)
+                if kd and not os.path.exists(kd):
+                    os.makedirs(kd, exist_ok=True)
+                with open(json_path, 'w') as f:
+                    json.dump(payload, f, indent=2)
+                with open(key_path, 'w') as f:
+                    f.write(api_key.strip() + "\n")
+                print(f"💾 Saved API key to {json_path} and {key_path}")
+                saved_any = True
+                break
             except Exception as e:
-                print(f"⚠️  Warning: Could not load token file: {e}")
+                tried.append((json_path, key_path, str(e)))
+                continue
+        if not saved_any:
+            for j, k, err in tried:
+                print(f"⚠️  Warning: Could not write {j} / {k}: {err}")
     
-    def _save_token(self, token_data: Dict[str, Any]) -> None:
-        """Save authentication token to file"""
-        token_file = "autotq_token.json"
-        try:
-            save_data = {
-                'access_token': token_data.get('access_token'),
-                'token_type': token_data.get('token_type', 'bearer'),
-                'training_completed': token_data.get('training_completed', False),
-                'requires_training': token_data.get('requires_training', True),
-                'saved_at': datetime.now().isoformat()
-            }
-            
-            with open(token_file, 'w') as f:
-                json.dump(save_data, f, indent=2)
-            print("💾 Authentication token saved")
-        except Exception as e:
-            print(f"⚠️  Warning: Could not save token: {e}")
-    
-    def login(self, username: str = None, password: str = None) -> bool:
-        """
-        Authenticate user with the AutoTQ server using OAuth2 form data
-        
+    def set_api_key(self, api_key: Optional[str] = None, prompt_if_missing: bool = True) -> bool:
+        """Set the API key, verify it by requesting the current user, and store in session headers.
+
         Args:
-            username: Username (will prompt if not provided)
-            password: Password (will prompt securely if not provided)
-            
+            api_key: The plaintext API key. If None and prompt_if_missing, prompt securely.
+            prompt_if_missing: Whether to prompt the user for input if the key is missing.
+
         Returns:
-            bool: True if login successful, False otherwise
+            bool: True if the API key works, False otherwise.
         """
-        print("\n🔐 AutoTQ Device Management System Login")
-        print("=" * 50)
-        
-        # Get credentials if not provided
-        if not username:
-            username = input("Username: ")
-        
-        if not password:
-            password = getpass.getpass("Password: ")
-        
+        if not api_key and prompt_if_missing:
+            try:
+                api_key = getpass.getpass("API key: ")
+            except Exception:
+                api_key = input("API key: ")
+
+        if not api_key:
+            print("❌ No API key provided")
+            return False
+
+        # Set header and verify
+        self.session.headers['X-API-Key'] = api_key
         try:
-            print("🔄 Attempting to authenticate...")
-            
-            # Use form data as expected by OAuth2PasswordRequestForm
-            form_data = {
-                'username': username,
-                'password': password,
-                'grant_type': 'password'  # OAuth2 standard
-            }
-            
-            # Make login request to the correct endpoint
-            response = self.session.post(
-                f"{self.base_url}/auth/token",
-                data=form_data,  # Use form data, not JSON
-                headers={'Content-Type': 'application/x-www-form-urlencoded'},
-                timeout=30
-            )
-            
-            if response.status_code == 200:
-                token_data = response.json()
-                
-                self.token = token_data.get('access_token')
-                self.token_type = token_data.get('token_type', 'bearer')
-                
-                if self.token:
-                    # Update session headers
-                    self.session.headers.update({
-                        'Authorization': f'{self.token_type.title()} {self.token}'
-                    })
-                    
-                    # Save token data
-                    self._save_token(token_data)
-                    
-                    print("✅ Login successful!")
-                    
-                    # Display training status if available
-                    training_completed = token_data.get('training_completed', False)
-                    requires_training = token_data.get('requires_training', False)
-                    
-                    if training_completed:
-                        print("🎓 Training: ✅ Completed")
-                    elif requires_training:
-                        print("📚 Training: ⚠️  Required (incomplete)")
-                    else:
-                        print("🎓 Training: Not required for your role")
-                    
-                    # Get and display user info
-                    user_info = self.get_user_profile()
-                    if user_info:
-                        print(f"👤 Welcome, {user_info.get('username', 'User')}!")
-                        print(f"📧 Email: {user_info.get('email', 'N/A')}")
-                        print(f"🏷️  Role: {user_info.get('role', 'N/A')}")
-                        print(f"🕐 Login time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-                        
-                        if user_info.get('full_name'):
-                            print(f"📋 Full name: {user_info['full_name']}")
-                        
-                        # Account status
-                        if user_info.get('is_active'):
-                            print("✅ Account status: Active")
-                        else:
-                            print("⚠️  Account status: Inactive")
-                        
-                        created_at = user_info.get('created_at')
-                        if created_at:
-                            print(f"📅 Account created: {created_at}")
-                    
-                    return True
-                else:
-                    print("❌ Login failed: No access token received")
-                    return False
-            
-            elif response.status_code == 401:
-                print("❌ Login failed: Invalid credentials")
-                return False
-            
-            elif response.status_code == 403:
-                print("❌ Login failed: Account may be locked or access forbidden")
-                return False
-            
+            me = self.get_user_profile()
+            if me:
+                self.api_key = api_key
+                print("✅ API key accepted")
+                print(f"👤 Logged in as: {me.get('username', 'Unknown')}")
+                # Persist the working API key for future runs
+                self._save_api_key(api_key)
+                return True
             else:
-                print(f"❌ Login failed: Server error (Status: {response.status_code})")
-                try:
-                    error_detail = response.json().get('detail', 'Unknown error')
-                    print(f"Error details: {error_detail}")
-                except:
-                    print(f"Error details: {response.text}")
+                # Remove header on failure
+                self.session.headers.pop('X-API-Key', None)
+                print("❌ Invalid API key")
                 return False
-                
-        except requests.exceptions.SSLError:
-            print("❌ SSL Certificate error. Try using --no-ssl-verify flag for local development")
-            return False
-        except requests.exceptions.ConnectionError:
-            print(f"❌ Connection error: Could not connect to {self.base_url}")
-            print("Make sure the AutoTQ server is running and accessible")
-            return False
-        except requests.exceptions.Timeout:
-            print("❌ Login timeout: Server did not respond in time")
-            return False
         except Exception as e:
-            print(f"❌ Unexpected error during login: {e}")
+            self.session.headers.pop('X-API-Key', None)
+            print(f"❌ Error validating API key: {e}")
             return False
+    
+    # Backward-compatible alias for existing callers
+    def login(self, *_args, **_kwargs) -> bool:
+        print("\n🔐 AutoTQ API Key Authentication")
+        print("=" * 50)
+        return self.set_api_key(prompt_if_missing=True)
     
     def get_user_profile(self) -> Optional[Dict[str, Any]]:
         """
@@ -199,24 +182,19 @@ class AutoTQClient:
         Returns:
             dict: User profile data or None if failed
         """
-        if not self.token:
-            print("❌ Not authenticated. Please login first.")
-            return None
-        
         try:
-            response = self.session.get(
-                f"{self.base_url}/users/me",
-                timeout=30
-            )
+            # Prefer versioned API path; fall back to legacy path
+            response = self.session.get(f"{self.base_url}/api/v1/users/me", timeout=30)
+            if response.status_code == 404:
+                response = self.session.get(f"{self.base_url}/users/me", timeout=30)
             
             if response.status_code == 200:
                 return response.json()
             elif response.status_code == 401:
-                print("❌ Authentication expired. Please login again.")
-                self.token = None
-                # Clear session headers
-                if 'Authorization' in self.session.headers:
-                    del self.session.headers['Authorization']
+                print("❌ Unauthorized. API key invalid or expired. Please enter it again.")
+                self.api_key = None
+                if 'X-API-Key' in self.session.headers:
+                    del self.session.headers['X-API-Key']
                 return None
             else:
                 print(f"❌ Failed to get user profile (Status: {response.status_code})")
@@ -233,41 +211,12 @@ class AutoTQClient:
         Returns:
             bool: True if logout successful, False otherwise
         """
-        if not self.token:
-            print("ℹ️  Not currently logged in")
-            return True
-        
-        try:
-            print("🔄 Logging out...")
-            
-            response = self.session.post(
-                f"{self.base_url}/auth/logout",
-                timeout=30
-            )
-            
-            # Clear token regardless of response
-            self.token = None
-            self.token_type = "bearer"
-            if 'Authorization' in self.session.headers:
-                del self.session.headers['Authorization']
-            
-            # Remove token file
-            token_file = "autotq_token.json"
-            if os.path.exists(token_file):
-                os.remove(token_file)
-            
-            if response.status_code in [200, 401]:  # 401 means already logged out
-                print("✅ Logout successful!")
-                return True
-            else:
-                print(f"⚠️  Logout response: {response.status_code}")
-                print("✅ Local session cleared")
-                return True
-                
-        except Exception as e:
-            print(f"⚠️  Error during logout: {e}")
-            print("✅ Local session cleared")
-            return True
+        # For API key auth, "logout" simply clears the local header
+        if 'X-API-Key' in self.session.headers:
+            del self.session.headers['X-API-Key']
+        self.api_key = None
+        print("✅ API key cleared from local session")
+        return True
     
     def check_connection(self) -> bool:
         """
@@ -318,12 +267,11 @@ class AutoTQClient:
         Returns:
             bool: True if authenticated, False otherwise
         """
-        if not self.token:
-            return False
-        
-        # Verify token is still valid by checking user profile
-        user_info = self.get_user_profile()
-        return user_info is not None
+        # API key flow: consider authenticated if API key header present and /users/me succeeds
+        if self.api_key or ('X-API-Key' in self.session.headers and self.session.headers.get('X-API-Key')):
+            user_info = self.get_user_profile()
+            return user_info is not None
+        return False
     
     def change_password(self, current_password: str = None, new_password: str = None) -> bool:
         """
@@ -336,8 +284,9 @@ class AutoTQClient:
         Returns:
             bool: True if password changed successfully, False otherwise
         """
+        # Not applicable for API key auth; keep endpoint call for compatibility if server supports it
         if not self.is_authenticated():
-            print("❌ Must be logged in to change password")
+            print("❌ Must be authenticated to change password")
             return False
         
         if not current_password:
@@ -383,7 +332,7 @@ class AutoTQClient:
             list: List of user's devices or None if failed
         """
         if not self.is_authenticated():
-            print("❌ Must be logged in to view devices")
+            print("❌ Must be authenticated to view devices")
             return None
         
         try:
@@ -429,8 +378,7 @@ def main():
                        help="Server URL (default: https://localhost:8000)")
     parser.add_argument("--no-ssl-verify", action="store_true",
                        help="Disable SSL certificate verification (for local dev)")
-    parser.add_argument("--username", help="Username for login")
-    parser.add_argument("--password", help="Password for login")
+    parser.add_argument("--api-key", help="API key for authentication (X-API-Key)")
     parser.add_argument("--check", action="store_true", 
                        help="Only check server connection")
     parser.add_argument("--logout", action="store_true",
@@ -462,21 +410,19 @@ def main():
     
     elif args.change_password:
         if not client.is_authenticated():
-            print("❌ Must login first to change password")
-            success = client.login(args.username, args.password)
+            print("❌ Must authenticate first to change password")
+            success = client.set_api_key(args.api_key, prompt_if_missing=True)
             if not success:
                 exit(1)
-        
         success = client.change_password()
         exit(0 if success else 1)
     
     elif args.devices:
         if not client.is_authenticated():
-            print("❌ Must login first to view devices")
-            success = client.login(args.username, args.password)
+            print("❌ Must authenticate first to view devices")
+            success = client.set_api_key(args.api_key, prompt_if_missing=True)
             if not success:
                 exit(1)
-        
         devices = client.get_my_devices()
         exit(0 if devices is not None else 1)
     
@@ -489,13 +435,13 @@ def main():
                 print(f"👤 Logged in as: {user_info.get('username', 'Unknown')}")
                 print(f"🏷️  Role: {user_info.get('role', 'Unknown')}")
                 print("\nAvailable commands:")
-                print("  --logout          Logout from the server")
-                print("  --change-password Change your password")
+                print("  --logout          Clear local API key header")
+                print("  --change-password Change your password (if supported)")
                 print("  --devices         List your devices")
                 print("  --check           Check server connection")
         else:
-            # Attempt login
-            success = client.login(args.username, args.password)
+            # Attempt API key auth
+            success = client.set_api_key(args.api_key, prompt_if_missing=True)
             if success:
                 print("\n🎉 Authentication complete! You can now use the AutoTQ system.")
                 print("\nTry these commands:")
@@ -503,7 +449,7 @@ def main():
                 print("  python autotq_client.py --change-password")
                 print("  python autotq_client.py --logout")
             else:
-                print("\n❌ Authentication failed. Please check your credentials and try again.")
+                print("\n❌ Authentication failed. Please check your API key and try again.")
                 exit(1)
 
 

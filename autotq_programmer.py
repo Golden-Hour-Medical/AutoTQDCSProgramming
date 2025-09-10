@@ -23,6 +23,16 @@ except ImportError as e:
     print("Make sure autotq_firmware_programmer.py and autotq_device_programmer.py are in the same directory")
     sys.exit(1)
 
+# Optional: Nordic PPK2 API
+try:
+    from ppk2_api.ppk2_api import PPK2_API  # type: ignore
+except Exception:
+    PPK2_API = None  # type: ignore
+try:
+    from serial.tools import list_ports  # type: ignore
+except Exception:
+    list_ports = None  # type: ignore
+
 
 class AutoTQProgrammer:
     """All-in-One AutoTQ Device Programmer"""
@@ -41,6 +51,7 @@ class AutoTQProgrammer:
         # Initialize sub-programmers
         self.firmware_programmer = AutoTQFirmwareProgrammer(str(self.firmware_dir))
         self.device_programmer = AutoTQDeviceProgrammer(audio_dir=str(self.audio_dir))
+        self.ppk = None  # type: ignore
         
         current_platform = platform.system()
         print(f"🚀 AutoTQ All-in-One Programmer initialized ({current_platform})")
@@ -92,6 +103,75 @@ class AutoTQProgrammer:
         
         self.log("All requirements met", "SUCCESS")
         return True
+
+    # --- PPK helpers ---
+    def _find_ppk_comport(self) -> Optional[str]:
+        try:
+            if list_ports is None:
+                return None
+            ports = list(list_ports.comports())
+            # Prefer VID:PID=1915:C00A
+            for p in ports:
+                try:
+                    if getattr(p, 'vid', None) == 0x1915 and getattr(p, 'pid', None) == 0xC00A:
+                        return p.device
+                except Exception:
+                    continue
+            # Fallback by description
+            for p in ports:
+                desc = (getattr(p, 'description', '') or '').lower()
+                if 'nrf connect usb cdc acm' in desc or 'ppk' in desc:
+                    return p.device
+            # Last resort: COM44
+            for p in ports:
+                if str(p.device).upper() == 'COM44':
+                    return p.device
+        except Exception:
+            return None
+        return None
+
+    def _auto_setup_ppk(self, voltage_mv: int = 4200) -> bool:
+        if PPK2_API is None:
+            return False
+        try:
+            port = self._find_ppk_comport()
+            if not port:
+                return False
+            if self.ppk is None:
+                self.ppk = PPK2_API(port)
+            ppk = self.ppk
+            try:
+                ppk.get_modifiers()
+            except Exception:
+                pass
+            # Configure as source meter and set voltage
+            ppk.use_source_meter()
+            ppk.set_source_voltage(int(voltage_mv))
+            # Try to remove current limit
+            try:
+                ppk.set_source_current_limit(0)
+            except Exception:
+                try:
+                    ppk.set_current_limit(0)  # type: ignore
+                except Exception:
+                    pass
+            # Enable power and start measuring to keep output active
+            try:
+                ppk.toggle_DUT_power("ON")
+            except Exception:
+                try:
+                    ppk.toggle_DUT_power(True)  # type: ignore
+                except Exception:
+                    pass
+            try:
+                ppk.start_measuring()
+            except Exception:
+                pass
+            self.log("[PPK] Configured source to 4.2 V and DUT power enabled", "INFO")
+            return True
+        except Exception as e:
+            self.log(f"[PPK] Setup failed: {e}", "WARNING")
+            return False
     
     def auto_detect_device(self) -> Optional[str]:
         """Auto-detect a single AutoTQ/ESP32-S3 device"""
@@ -165,6 +245,12 @@ class AutoTQProgrammer:
             self.log("🐌 Development mode: Slower but with verification", "INFO")
         self.log("=" * 60, "INFO")
         
+        # Step 0: If PPK present, configure to 4.2 V source (non-blocking)
+        if self._auto_setup_ppk(voltage_mv=4200):
+            self.log("PPK present: powering DUT at 4.2 V before flashing", "INFO")
+        else:
+            self.log("PPK not found or not configured; proceeding without PPK", "WARNING")
+
         # Step 1: Flash Firmware
         self.log("\n⚡ STEP 1: FIRMWARE PROGRAMMING", "FLASH")
         self.log("-" * 40, "INFO")

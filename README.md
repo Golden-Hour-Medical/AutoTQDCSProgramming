@@ -63,7 +63,7 @@ python autotq_programmer.py
 ### Required Python Packages
 The tools will automatically install these when needed:
 ```bash
-pip install pyserial esptool requests tqdm psutil cryptography
+pip install pyserial esptool requests tqdm psutil cryptography ppk2_api
 ```
 
 ### Hardware
@@ -84,6 +84,38 @@ pip install pyserial esptool requests tqdm psutil cryptography
    python autotq_setup.py
    python autotq_programmer.py
    ```
+
+## 🧳 Portable Windows Venv (No System Python Changes)
+
+Create a self-contained folder you can zip and ship:
+
+1) Create venv and install deps:
+```bat
+py -3.11 -m venv .venv
+.\.venv\Scripts\python -m pip install --upgrade pip
+.\.venv\Scripts\pip install -r requirements.txt ppk2_api
+```
+
+Optional (plotting overlays):
+```bat
+.\.venv\Scripts\pip install matplotlib
+```
+
+2) Create `run_unified.bat`:
+```bat
+@echo off
+setlocal
+set PYTHONUTF8=1
+set SSL_CERT_FILE=
+set REQUESTS_CA_BUNDLE=
+.\.venv\Scripts\python.exe autotq_unified_production.py %*
+```
+
+3) Run:
+```bat
+run_unified.bat --api-key YOUR_KEY
+```
+Place a `.autotq_api_key` file (containing your key) next to the script to skip prompts.
 
 ### Linux/macOS (Community Support)
 1. **Make script executable and run**:

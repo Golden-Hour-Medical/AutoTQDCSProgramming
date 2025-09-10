@@ -13,6 +13,7 @@ import subprocess
 import threading
 from pathlib import Path
 from typing import Optional, List, Dict, Any, Tuple
+from queue import Queue, Empty
 from datetime import datetime
 import shutil
 import platform
@@ -682,60 +683,138 @@ class AutoTQFirmwareProgrammer:
             
             self.log(f"Executing: {' '.join(cmd)}")
             
-            # Start flashing with progress tracking
+            # Start flashing with progress tracking and watchdog to avoid silent hangs
             self.log("Starting firmware flash operation...", "PROGRESS")
-            process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, 
-                                     text=True, universal_newlines=True)
-            
-            # Track progress if tqdm is available
+            process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                                       text=True, universal_newlines=True, bufsize=1)
+
+            output_queue: Queue[str] = Queue()
+            last_output_time = time.time()
+            start_time = last_output_time
+            global_timeout_s = 180.0
+            idle_heartbeat_s = 15.0
+
+            def reader_thread_func():
+                try:
+                    assert process.stdout is not None
+                    for line in process.stdout:
+                        output_queue.put(line)
+                except Exception:
+                    pass
+
+            reader_thread = threading.Thread(target=reader_thread_func, daemon=True)
+            reader_thread.start()
+
+            def handle_line(line: str, update_pbar):
+                nonlocal last_output_time
+                last_output_time = time.time()
+                print(line.strip())
+                if "%" in line and "(" in line:
+                    try:
+                        percent_pos = line.find("(") + 1
+                        percent_end = line.find("%", percent_pos)
+                        if percent_pos > 0 and percent_end > percent_pos:
+                            progress = int(line[percent_pos:percent_end].strip())
+                            update_pbar(progress)
+                    except (ValueError, IndexError):
+                        pass
+
+            # Progress handling wrapper
             if HAS_TQDM:
                 print("📤 Initializing flash operation...")
-                with tqdm(total=100, desc="Flashing", unit="%", ncols=80, 
-                         bar_format='{l_bar}{bar}| {n:.0f}% [{elapsed}<{remaining}]') as pbar:
+                with tqdm(total=100, desc="Flashing", unit="%", ncols=80,
+                          bar_format='{l_bar}{bar}| {n:.0f}% [{elapsed}<{remaining}]') as pbar:
                     last_progress = 0
-                    
-                    for line in process.stdout:
-                        print(line.strip())  # Print esptool output
-                        
-                        # Look for progress indicators in esptool output
-                        if "%" in line and "(" in line:
+
+                    def update_pbar(progress: int):
+                        nonlocal last_progress
+                        if 0 <= progress <= 100:
+                            pbar.update(progress - last_progress)
+                            last_progress = progress
+
+                    # Main loop with watchdog
+                    while True:
+                        # Drain any available lines
+                        drained_any = False
+                        try:
+                            while True:
+                                line = output_queue.get_nowait()
+                                drained_any = True
+                                handle_line(line, update_pbar)
+                        except Empty:
+                            pass
+
+                        if process.poll() is not None and output_queue.empty():
+                            break
+
+                        now = time.time()
+                        if now - last_output_time > idle_heartbeat_s:
+                            print("[FLASH] Still waiting for esptool output... If stuck at 'Connecting...', try holding BOOT and tapping EN.")
+                            last_output_time = now  # avoid spamming
+
+                        if now - start_time > global_timeout_s:
+                            self.log("Flashing timed out. Aborting esptool process.", "ERROR")
                             try:
-                                # Extract percentage from lines like "Writing at 0x00008000... (12 %)"
-                                percent_pos = line.find("(") + 1
-                                percent_end = line.find("%", percent_pos)
-                                if percent_pos > 0 and percent_end > percent_pos:
-                                    progress = int(line[percent_pos:percent_end].strip())
-                                    pbar.update(progress - last_progress)
-                                    last_progress = progress
-                            except (ValueError, IndexError):
+                                process.kill()
+                            except Exception:
                                 pass
+                            break
+
+                        # Avoid tight loop
+                        if not drained_any:
+                            time.sleep(0.1)
+
             else:
-                # Simple progress without tqdm with spinner for initial phase
                 print("📤 Initializing flash operation...")
                 initial_phase = True
-                
-                def simple_spinner():
-                    spinner_chars = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
-                    i = 0
-                    while initial_phase:
-                        print(f"\r⏳ Preparing to flash... {spinner_chars[i % len(spinner_chars)]}", end="", flush=True)
-                        time.sleep(0.1)
-                        i += 1
-                
-                spinner_thread = threading.Thread(target=simple_spinner, daemon=True)
-                spinner_thread.start()
-                
-                for line in process.stdout:
-                    if initial_phase and ("Writing at" in line or "%" in line):
+
+                def update_pbar(_progress: int):
+                    nonlocal initial_phase
+                    if initial_phase:
+                        print("\r" + " " * 50 + "\r", end="")
                         initial_phase = False
-                        print("\r" + " " * 50 + "\r", end="")  # Clear spinner
-                    print(line.strip())
-                
-                initial_phase = False
-            
-            process.wait()
-            
-            if process.returncode == 0:
+
+                spinner_chars = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
+                i = 0
+                while True:
+                    drained_any = False
+                    try:
+                        while True:
+                            line = output_queue.get_nowait()
+                            drained_any = True
+                            if initial_phase and ("Writing at" in line or "%" in line):
+                                print("\r" + " " * 50 + "\r", end="")
+                                initial_phase = False
+                            handle_line(line, update_pbar)
+                    except Empty:
+                        pass
+
+                    if process.poll() is not None and output_queue.empty():
+                        break
+
+                    now = time.time()
+                    if initial_phase:
+                        print(f"\r⏳ Preparing to flash... {spinner_chars[i % len(spinner_chars)]}", end="", flush=True)
+                        i += 1
+
+                    if now - last_output_time > idle_heartbeat_s:
+                        print("[FLASH] Still waiting for esptool output... If stuck at 'Connecting...', try holding BOOT and tapping EN.")
+                        last_output_time = now
+
+                    if now - start_time > global_timeout_s:
+                        self.log("Flashing timed out. Aborting esptool process.", "ERROR")
+                        try:
+                            process.kill()
+                        except Exception:
+                            pass
+                        break
+
+                    if not drained_any:
+                        time.sleep(0.1)
+
+            ret = process.wait(timeout=5) if process.poll() is None else process.returncode
+
+            if ret == 0:
                 self.log("Firmware flashed successfully!", "SUCCESS")
                 self.log("Device will now reboot with new firmware", "INFO")
                 return True

@@ -85,7 +85,7 @@ class AutoTQDeviceProgrammer:
     SEND_SIZE = 128    # Small pieces for reliable transfer
     PIECE_DELAY = 0.005  # 5ms delay for device flash write processing
     
-    def __init__(self, port: str = None, audio_dir: str = None, server_url: str = None):
+    def __init__(self, port: str = None, audio_dir: str = None, server_url: str = None, stabilize_ms: int = 2000):
         """
         Initialize the AutoTQ Device Programmer
         
@@ -100,6 +100,7 @@ class AutoTQDeviceProgrammer:
         self.server_url = server_url
         self.is_connected = False
         self.device_info = {}
+        self.stabilize_ms = stabilize_ms
         
         # Transfer speed parameters (instance attributes for compatibility)
         self.write_chunk_size = self.SEND_SIZE
@@ -246,25 +247,71 @@ class AutoTQDeviceProgrammer:
                 self.log(f"Auto-selected ESP32-S3 device: {esp32_ports[0][1]}", "SUCCESS")
                 return selected_port
             else:
-                # Multiple ESP32 devices or mixed devices - require manual selection
+                # Multiple ESP32 devices or mixed devices - manual selection
                 self.log("Multiple compatible devices found - manual selection required", "WARNING")
                 return None
         else:
             self.log("No compatible devices detected", "ERROR")
             return None
 
+    def _choose_port_interactively(self) -> Optional[str]:
+        """Prompt user to choose a serial port when multiple are available."""
+        ports = self.list_available_ports()
+        if not ports:
+            return None
+        print("\n📟 Available serial ports:")
+        for idx, (port, desc) in enumerate(ports, 1):
+            print(f"  {idx}. {desc}")
+        try:
+            choice = input(f"Select port [1-{len(ports)}]: ").strip()
+            if choice == "":
+                return ports[0][0]
+            i = int(choice)
+            if 1 <= i <= len(ports):
+                return ports[i-1][0]
+        except Exception:
+            pass
+        self.log("Invalid selection", "ERROR")
+        return None
+
     def connect(self) -> bool:
-        """Establish serial connection with the device like JavaScript."""
+        """Establish serial connection with the device like JavaScript with clean DTR/RTS."""
         if not self.port_name:
-            self.port_name = self.auto_detect_port()
-            if not self.port_name:
-                self.log("No device port specified and auto-detection failed", "ERROR")
-                return False
-                
+            # Try auto-detect; if ambiguous, prompt
+            detected = self.auto_detect_port()
+            if detected:
+                self.port_name = detected
+            else:
+                self.port_name = self._choose_port_interactively()
+                if not self.port_name:
+                    self.log("No device port specified and selection failed", "ERROR")
+                    return False
         try:
             self.log(f"🔗 Connecting to {self.port_name}...")
-            self.serial_port = serial.Serial(self.port_name, **self.SERIAL_PARAMS)
-            time.sleep(2)  # Allow connection to stabilize
+            # Open with DTR/RTS deasserted to avoid resets
+            s = serial.Serial()
+            s.port = self.port_name
+            s.baudrate = self.SERIAL_PARAMS['baudrate']
+            s.bytesize = self.SERIAL_PARAMS['bytesize']
+            s.parity = self.SERIAL_PARAMS['parity']
+            s.stopbits = self.SERIAL_PARAMS['stopbits']
+            s.xonxoff = self.SERIAL_PARAMS['xonxoff']
+            s.rtscts = self.SERIAL_PARAMS['rtscts']
+            s.dsrdtr = self.SERIAL_PARAMS['dsrdtr']
+            s.timeout = self.SERIAL_PARAMS['timeout']
+            try:
+                s.dtr = False
+                s.rts = False
+            except Exception:
+                pass
+            s.open()
+            s.setDTR(False)
+            s.setRTS(False)
+            self.serial_port = s
+            # Allow connection to stabilize
+            delay = max(0, int(self.stabilize_ms)) / 1000.0
+            if delay > 0:
+                time.sleep(delay)
             
             # Start reader thread like JavaScript
             self.running = True
@@ -799,6 +846,8 @@ Transfer Modes:
                        help="Directory containing audio files (default: ./audio)")
     parser.add_argument("--server-url", "-s",
                        help="Server URL for downloading audio files")
+    parser.add_argument("--stabilize-ms", type=int, default=2000,
+                       help="Delay after opening serial port before sending commands (ms)")
     parser.add_argument("--transfer-all", action="store_true",
                        help="Automatically transfer all required files and exit")
     parser.add_argument("--list-ports", action="store_true",
@@ -826,7 +875,8 @@ Transfer Modes:
         programmer = AutoTQDeviceProgrammer(
             port=args.port,
             audio_dir=args.audio_dir,
-            server_url=args.server_url
+            server_url=args.server_url,
+            stabilize_ms=args.stabilize_ms
         )
         
         # Set transfer speed

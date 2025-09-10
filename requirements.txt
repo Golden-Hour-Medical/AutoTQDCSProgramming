@@ -20,3 +20,6 @@ distro>=1.7.0; sys_platform == "linux"
 
 # Additional utilities
 pathlib2>=2.3.0; python_version < '3.4'  # Backport for older Python 
+
+# PPK2 (power profiler) control
+ppk2_api>=0.2.3

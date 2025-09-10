@@ -1,7 +1,4 @@
 {
-  "access_token": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJhZG1pbjAxIiwicm9sZSI6ImFkbWluIiwiZXhwIjoxNzUwOTkyNTcwfQ.lPprLCYCl3d60uyvVjNjwQtSt72ewWMta8ZAgoYF9fg",
-  "token_type": "bearer",
-  "training_completed": true,
-  "requires_training": false,
-  "saved_at": "2025-06-26T22:19:15.974676"
+  "api_key": "HYCvDAcEdfymF_aVLvdewhvW7dW88xrTwPP8tIiHuBs",
+  "saved_at": "2025-09-10T19:44:42.572069Z"
 }

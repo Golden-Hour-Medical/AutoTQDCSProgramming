@@ -19,7 +19,7 @@ if errorlevel 1 (
 
 echo Step 1: Installing required packages...
 python -m pip install --upgrade pip
-python -m pip install -r requirements.txt
+python -m pip install -r requirements.txt ppk2_api
 if errorlevel 1 (
     echo ERROR: Failed to install packages
     echo Try running as Administrator
