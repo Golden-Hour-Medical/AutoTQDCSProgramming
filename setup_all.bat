@@ -12,7 +12,7 @@ if not defined PYEXE (
   where py >nul 2>&1 && set "PYEXE=py -3.11"
 )
 if not defined PYEXE (
-  echo Python not found. Installing Python 3.11 (user scope) via winget...
+  echo Python not found. Installing Python 3.11 ^(user scope^) via winget...
   winget install -e --id Python.Python.3.11 --scope user --accept-package-agreements --accept-source-agreements || (
     echo [ERROR] winget installation failed. Please install Python 3.11 manually.
     pause
