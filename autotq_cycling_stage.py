@@ -114,19 +114,67 @@ def run_repeats_for_all(client: AutoTQClient, port_to_pcb: Dict[str, int], stage
                 log(f"[MEASURE] {port}: failed to obtain result (repeat {r})")
 
 
+def get_safe_humidity_for_temp(target_c: float, requested_rh: Optional[float]) -> Optional[float]:
+    """Calculate safe humidity setpoint based on temperature to prevent chamber alarms."""
+    if requested_rh is None:
+        return None
+    
+    # Temperature-based humidity limits for typical ESPEC chambers
+    if target_c <= -10.0:
+        # Very low temperatures: disable humidity control to prevent ice formation
+        log(f"[CHAMBER] Disabling humidity control at {target_c:.1f}°C (too cold for safe RH control)")
+        return None
+    elif target_c <= 5.0:
+        # Low temperatures: limit to very low humidity to prevent condensation
+        safe_rh = min(requested_rh, 20.0)
+        if safe_rh != requested_rh:
+            log(f"[CHAMBER] Limiting humidity to {safe_rh:.1f}% at {target_c:.1f}°C (requested {requested_rh:.1f}%)")
+        return safe_rh
+    elif target_c <= 15.0:
+        # Cool temperatures: moderate humidity limit
+        safe_rh = min(requested_rh, 60.0)
+        if safe_rh != requested_rh:
+            log(f"[CHAMBER] Limiting humidity to {safe_rh:.1f}% at {target_c:.1f}°C (requested {requested_rh:.1f}%)")
+        return safe_rh
+    elif target_c >= 70.0:
+        # High temperatures: may need lower humidity to prevent over-saturation
+        safe_rh = min(requested_rh, 80.0)
+        if safe_rh != requested_rh:
+            log(f"[CHAMBER] Limiting humidity to {safe_rh:.1f}% at {target_c:.1f}°C (requested {requested_rh:.1f}%)")
+        return safe_rh
+    else:
+        # Normal temperature range: use requested humidity
+        return requested_rh
+
+
 def chamber_set_and_wait(inst, target_c: float, tol: float, stable_samples: int, poll_s: float, min_dwell_s: float = 0.0, label: str = "", rh_percent: Optional[float] = None) -> None:
     ok = gpib.set_constant_temp(inst, target_c)
     if not ok:
         log(f"[CHAMBER] Could not confirm setpoint {target_c:.1f}°C (continuing anyway)")
     gpib.power_on(inst)
+    
+    # Calculate temperature-appropriate humidity setpoint
+    safe_rh = get_safe_humidity_for_temp(target_c, rh_percent)
+    
     # Attempt to set humidity (optional; ignore failures)
-    if rh_percent is not None:
+    if safe_rh is not None:
+        # Validate humidity range (typical chamber range is 10-95% RH)
+        if safe_rh < 10.0 or safe_rh > 95.0:
+            log(f"[CHAMBER] WARNING: Humidity {safe_rh:.1f}% is outside typical range (10-95%). This may cause AL26 or other chamber alarms.")
+            if safe_rh < 10.0:
+                safe_rh = 10.0
+                log(f"[CHAMBER] Adjusting humidity to minimum safe value: {safe_rh:.1f}%")
         try:
-            ok_h = gpib.set_humidity(inst, rh_percent)
+            ok_h = gpib.set_humidity(inst, safe_rh)
             if not ok_h:
                 log(f"[CHAMBER] Humidity control not available or failed; continuing without RH control")
-        except Exception:
-            log(f"[CHAMBER] Humidity set attempt failed; continuing")
+            else:
+                log(f"[CHAMBER] Humidity setpoint: {safe_rh:.1f}% RH at {target_c:.1f}°C")
+        except Exception as e:
+            log(f"[CHAMBER] Humidity set attempt failed ({e}); continuing without RH control")
+    else:
+        log(f"[CHAMBER] Humidity control disabled for {target_c:.1f}°C")
+    
     log(f"[CHAMBER] Waiting for {label or f'{target_c:.1f}°C'} within ±{tol}°C...")
     gpib.wait_until_temp(inst, target_c, tol=tol, stable_samples=stable_samples, poll_s=poll_s)
     if min_dwell_s > 0:
@@ -150,7 +198,7 @@ def main() -> int:
     parser.add_argument("--tol", type=float, default=0.5, help="Temperature tolerance (°C)")
     parser.add_argument("--stable-samples", type=int, default=5, help="Consecutive in-tolerance samples to accept stability")
     parser.add_argument("--poll-sec", type=float, default=1.0, help="Chamber poll interval (seconds)")
-    parser.add_argument("--rh", type=float, default=0.0, help="Target relative humidity percentage (if supported)")
+    parser.add_argument("--rh", type=float, default=45.0, help="Target relative humidity percentage. Auto-adjusts based on temperature: disabled at ≤-10°C, limited at low/high temps to prevent chamber alarms")
     args = parser.parse_args()
 
     client = AutoTQClient(base_url=args.url, verify_ssl=not args.no_ssl_verify)

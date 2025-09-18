@@ -52,12 +52,6 @@ All commands are sent as JSON objects terminated with `\n`:
 {"command": "wifi_get_mac", "mac": "AA:BB:CC:DD:EE:FF"}
 ```
 
-#### 2. Get Device Status
-```json
-{"command": "get_status"}
-```
-**Response:** Device-specific status information
-
 #### 3. List Files on Device
 ```json
 {"command": "list_files"}
