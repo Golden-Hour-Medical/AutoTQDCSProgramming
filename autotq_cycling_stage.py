@@ -119,6 +119,11 @@ def get_safe_humidity_for_temp(target_c: float, requested_rh: Optional[float]) -
     if requested_rh is None:
         return None
     
+    # Special case: if user explicitly sets 0% RH, respect it (disable humidity control)
+    if requested_rh == 0.0:
+        log(f"[CHAMBER] Humidity control explicitly disabled (--rh 0)")
+        return None
+    
     # Temperature-based humidity limits for typical ESPEC chambers
     if target_c <= -10.0:
         # Very low temperatures: disable humidity control to prevent ice formation
