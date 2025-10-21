@@ -183,9 +183,11 @@ def chamber_set_and_wait(inst, target_c: float, tol: float, stable_samples: int,
         try:
             ok_off = gpib.turn_humidity_off(inst)
             if ok_off:
-                log(f"[CHAMBER] Humidity control disabled successfully (HUA, OFF)")
+                log(f"[CHAMBER] ✅ Humidity control disabled successfully")
             else:
-                log(f"[CHAMBER] Could not confirm humidity OFF; continuing anyway")
+                log(f"[CHAMBER] ⚠️  Could not confirm humidity OFF command")
+                log(f"[CHAMBER] This may be normal if your chamber doesn't support humidity control")
+                log(f"[CHAMBER] Continuing with temperature cycling (humidity will float naturally)")
         except Exception as e:
             log(f"[CHAMBER] Humidity OFF command failed ({e}); continuing anyway")
     

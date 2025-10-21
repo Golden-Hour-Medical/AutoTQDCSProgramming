@@ -205,12 +205,54 @@ def set_humidity(inst, rh_percent: float) -> bool:
     except Exception:
         return False
 
-def turn_humidity_off(inst) -> bool:
-    """Explicitly turn off humidity control (dry run mode)."""
+def check_humidity_capability(inst) -> bool:
+    """Check if chamber has humidity control capability."""
     try:
-        r = tx(inst, "HUA, OFF")
-        return is_ok(r) or r == ""
+        # Try to query current humidity setting
+        r = q(inst, "CONSTANT SET?,HUMI")
+        # If we get a valid response (not NA: or error), humidity is supported
+        if r and not r.startswith("NA:") and not r.startswith("ER:"):
+            return True
+        return False
     except Exception:
+        return False
+
+def turn_humidity_off(inst) -> bool:
+    """Explicitly turn off humidity control (dry run mode). Tries multiple command formats."""
+    try:
+        # Try method 1: HUA, OFF (humidity automation off)
+        r1 = tx(inst, "HUA, OFF")
+        if is_ok(r1) or r1 == "":
+            print(f"[DEBUG] Humidity OFF successful with: HUA, OFF")
+            return True
+        
+        # Try method 2: HUMI, OFF (some chambers use this)
+        r2 = tx(inst, "HUMI, OFF")
+        if is_ok(r2) or r2 == "":
+            print(f"[DEBUG] Humidity OFF successful with: HUMI, OFF")
+            return True
+        
+        # Try method 3: Set humidity to OFF state in constant mode
+        r3 = tx(inst, "CONSTANT SET, HUMI, OFF")
+        if is_ok(r3) or r3 == "":
+            print(f"[DEBUG] Humidity OFF successful with: CONSTANT SET, HUMI, OFF")
+            return True
+        
+        # None worked, log responses for debugging
+        print(f"[DEBUG] Humidity OFF command responses:")
+        print(f"[DEBUG]   HUA, OFF -> '{r1}'")
+        print(f"[DEBUG]   HUMI, OFF -> '{r2}'")
+        print(f"[DEBUG]   CONSTANT SET, HUMI, OFF -> '{r3}'")
+        
+        # Check if chamber even has humidity capability
+        has_humidity = check_humidity_capability(inst)
+        if not has_humidity:
+            print(f"[DEBUG] Chamber appears to be temperature-only (no humidity control)")
+            return True  # Return True since there's nothing to turn off
+        
+        return False
+    except Exception as e:
+        print(f"[DEBUG] Humidity OFF exception: {e}")
         return False
 
 def dry_chamber_prep(inst, dry_temp: float = 40.0, dry_rh: float = 10.0, dry_duration_min: float = 30.0) -> None:
