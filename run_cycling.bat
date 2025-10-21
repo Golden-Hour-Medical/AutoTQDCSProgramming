@@ -20,9 +20,10 @@ REM Ensure pyvisa is available (quiet install if missing)
   )
 )
 
-REM Process arguments to handle --no-humidity option
+REM Process arguments to handle --no-humidity and --dry-prep options
 set ARGS=
 set NO_HUMIDITY=0
+set DRY_PREP=0
 
 :parse_args
 if "%1"=="" goto :run_program
@@ -31,19 +32,35 @@ if "%1"=="--no-humidity" (
   shift
   goto :parse_args
 )
+if "%1"=="--dry-prep" (
+  set DRY_PREP=1
+  shift
+  goto :parse_args
+)
 set ARGS=%ARGS% %1
 shift
 goto :parse_args
 
 :run_program
+REM Build command line based on flags
+set CMD=.\.venv\Scripts\python.exe autotq_cycling_stage.py
+
 REM Add --rh 0 if --no-humidity was specified
 if %NO_HUMIDITY%==1 (
   echo [INFO] Running with humidity control disabled (--rh 0)
-  .\.venv\Scripts\python.exe autotq_cycling_stage.py --rh 0 %ARGS%
+  set CMD=%CMD% --rh 0
 ) else (
   echo [INFO] Running with default smart humidity control (--rh 45)
-  .\.venv\Scripts\python.exe autotq_cycling_stage.py %ARGS%
 )
+
+REM Add --dry-prep if specified
+if %DRY_PREP%==1 (
+  echo [INFO] Running with dry prep cycle (40C @ 10%% RH for 30 min)
+  set CMD=%CMD% --dry-prep
+)
+
+REM Execute with remaining args
+%CMD% %ARGS%
 goto :end
 
 :show_help
@@ -53,6 +70,7 @@ echo Usage: run_cycling.bat [OPTIONS]
 echo.
 echo Batch-specific options:
 echo   --no-humidity     Disable all humidity control (sets --rh 0)
+echo   --dry-prep        Pre-dry chamber before cycling (40C @ 10%% RH for 30 min)
 echo   -h, --help, /?    Show this help
 echo.
 echo All other options are passed to autotq_cycling_stage.py:
@@ -64,10 +82,11 @@ echo   --rh PERCENT      Humidity percentage (default: 45, auto-adjusts by temp)
 echo   --tol TEMP        Temperature tolerance (default: 0.5)
 echo.
 echo Examples:
-echo   run_cycling.bat                    ^(default: 3 cycles with smart humidity^)
-echo   run_cycling.bat --no-humidity     ^(disable humidity control^)
-echo   run_cycling.bat --cycles 5        ^(5 cycles with smart humidity^)
-echo   run_cycling.bat --no-humidity --cycles 10  ^(10 cycles, no humidity^)
+echo   run_cycling.bat                              ^(default: 3 cycles with smart humidity^)
+echo   run_cycling.bat --no-humidity                ^(disable humidity control^)
+echo   run_cycling.bat --no-humidity --dry-prep     ^(dry run: pre-dry + no humidity^)
+echo   run_cycling.bat --cycles 5                   ^(5 cycles with smart humidity^)
+echo   run_cycling.bat --no-humidity --cycles 10    ^(10 cycles, no humidity^)
 echo.
 
 :end

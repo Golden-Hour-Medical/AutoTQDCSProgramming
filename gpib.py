@@ -205,6 +205,27 @@ def set_humidity(inst, rh_percent: float) -> bool:
     except Exception:
         return False
 
+def turn_humidity_off(inst) -> bool:
+    """Explicitly turn off humidity control (dry run mode)."""
+    try:
+        r = tx(inst, "HUA, OFF")
+        return is_ok(r) or r == ""
+    except Exception:
+        return False
+
+def dry_chamber_prep(inst, dry_temp: float = 40.0, dry_rh: float = 10.0, dry_duration_min: float = 30.0) -> None:
+    """Pre-conditioning: Run low humidity at elevated temp to dry the chamber before cycling."""
+    print(f"[DRY PREP] Pre-drying chamber: {dry_temp:.1f}°C @ {dry_rh:.0f}% RH for {dry_duration_min:.0f} minutes")
+    set_constant_temp(inst, dry_temp)
+    set_humidity(inst, dry_rh)
+    power_on(inst)
+    print(f"[DRY PREP] Waiting for temperature stability...")
+    wait_until_temp(inst, dry_temp, tol=1.0, stable_samples=3, poll_s=2.0)
+    print(f"[DRY PREP] Drying in progress... ({dry_duration_min:.0f} min)")
+    time.sleep(dry_duration_min * 60)
+    print(f"[DRY PREP] Dry prep complete. Turning humidity OFF for cycling.")
+    turn_humidity_off(inst)
+
 def wait_until_temp(inst, target_c: float, tol: float = 0.5, stable_samples: int = 5, poll_s: float = 1.0, timeout_s: float = None):
     """Block until specimen/chamber temp within tol for stable_samples; returns last mon dict or None on timeout."""
     start = time.time()

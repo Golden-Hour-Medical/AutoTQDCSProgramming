@@ -178,7 +178,16 @@ def chamber_set_and_wait(inst, target_c: float, tol: float, stable_samples: int,
         except Exception as e:
             log(f"[CHAMBER] Humidity set attempt failed ({e}); continuing without RH control")
     else:
-        log(f"[CHAMBER] Humidity control disabled for {target_c:.1f}°C")
+        # Explicitly turn off humidity control for dry run
+        log(f"[CHAMBER] Turning humidity OFF (dry run mode) for {target_c:.1f}°C")
+        try:
+            ok_off = gpib.turn_humidity_off(inst)
+            if ok_off:
+                log(f"[CHAMBER] Humidity control disabled successfully (HUA, OFF)")
+            else:
+                log(f"[CHAMBER] Could not confirm humidity OFF; continuing anyway")
+        except Exception as e:
+            log(f"[CHAMBER] Humidity OFF command failed ({e}); continuing anyway")
     
     log(f"[CHAMBER] Waiting for {label or f'{target_c:.1f}°C'} within ±{tol}°C...")
     gpib.wait_until_temp(inst, target_c, tol=tol, stable_samples=stable_samples, poll_s=poll_s)
@@ -204,6 +213,10 @@ def main() -> int:
     parser.add_argument("--stable-samples", type=int, default=5, help="Consecutive in-tolerance samples to accept stability")
     parser.add_argument("--poll-sec", type=float, default=1.0, help="Chamber poll interval (seconds)")
     parser.add_argument("--rh", type=float, default=45.0, help="Target relative humidity percentage. Auto-adjusts based on temperature: disabled at ≤-10°C, limited at low/high temps to prevent chamber alarms")
+    parser.add_argument("--dry-prep", action="store_true", help="Pre-dry the chamber before cycling (runs 40°C @ 10%% RH for 30min to remove moisture)")
+    parser.add_argument("--dry-prep-temp", type=float, default=40.0, help="Dry prep temperature (default: 40°C)")
+    parser.add_argument("--dry-prep-rh", type=float, default=10.0, help="Dry prep humidity (default: 10%%)")
+    parser.add_argument("--dry-prep-min", type=float, default=30.0, help="Dry prep duration in minutes (default: 30)")
     args = parser.parse_args()
 
     client = AutoTQClient(base_url=args.url, verify_ssl=not args.no_ssl_verify)
@@ -218,6 +231,12 @@ def main() -> int:
     log("[CHAMBER] Connecting...")
     inst = wait_for_chamber_available(retry_s=5.0)
     log("[CHAMBER] Connected.")
+
+    # Optional: Pre-dry the chamber to remove ambient moisture
+    if args.dry_prep:
+        log("[CHAMBER] Starting dry prep cycle to remove moisture...")
+        gpib.dry_chamber_prep(inst, dry_temp=args.dry_prep_temp, dry_rh=args.dry_prep_rh, dry_duration_min=args.dry_prep_min)
+        log("[CHAMBER] Dry prep complete. Chamber is now moisture-reduced.")
 
     # Device discovery and PCB ensure
     port_to_pcb = discover_devices_and_pcbs(client, stage_label=stage_label)
