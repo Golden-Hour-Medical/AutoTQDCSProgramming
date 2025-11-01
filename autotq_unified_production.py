@@ -328,12 +328,12 @@ def main() -> int:
         ppk = wait_for_ppk()
         if not ppk:
             log("❌ PPK not detected. Please connect the Nordic PPK2 and press Enter to retry.")
-            if not args.auto_proceed:
-                try:
-                    input()
-                except Exception:
-                    pass
-                ppk = wait_for_ppk()
+            # Always wait for PPK even in auto-proceed mode (hardware requirement)
+            try:
+                input()
+            except Exception:
+                pass
+            ppk = wait_for_ppk()
             if not ppk:
                 _print_summary(steps)
                 return 1

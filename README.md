@@ -51,6 +51,24 @@ python autotq_programmer.py
 - **Audio transfer**: ~60-90 seconds (could be optimized further)
 - **Device detection**: Near-instant
 
+### Step 3 (Optional): Bulk Audio Transfer for Multiple Devices
+For **high-volume production** or when you need to update audio on multiple devices:
+
+```bash
+# Transfer audio to ALL connected devices simultaneously
+python autotq_bulk_audio_transfer.py
+
+# Or use the convenient batch script
+run_bulk_audio.bat
+```
+
+**Why use bulk transfer?**
+- ⚡ **Parallel processing** - Transfer to 10 devices in the time of 1
+- 🏭 **Production optimized** - Perfect for manufacturing lines
+- 🔄 **Continuous mode** - Keep detecting and transferring to new batches
+
+See the [Detailed Usage](#bulk-audio-transfer-new---parallel-transfer) section for more options.
+
 ## 📋 System Requirements
 
 ### Verified Working Environment
@@ -185,6 +203,52 @@ python autotq_programmer.py --batch
 python autotq_programmer.py --check-only
 ```
 
+#### Bulk Audio Transfer (NEW - Parallel Transfer)
+Transfer audio files to multiple devices **simultaneously** for faster production:
+
+```bash
+# Auto-detect all devices and transfer audio in parallel
+python autotq_bulk_audio_transfer.py
+
+# No confirmation prompts - start immediately
+python autotq_bulk_audio_transfer.py --no-prompt
+
+# Use fastest transfer speed
+python autotq_bulk_audio_transfer.py --speed ultrafast
+
+# Continuous mode - keep detecting and transferring to new devices
+python autotq_bulk_audio_transfer.py --continuous
+
+# Combine options for fully automated production line
+python autotq_bulk_audio_transfer.py --no-prompt --speed fast
+```
+
+**Windows Batch Scripts:**
+```cmd
+# Interactive mode - confirm before transfer
+run_bulk_audio.bat
+
+# Fully automated - no prompts
+run_bulk_audio.bat --no-prompt
+
+# Continuous production mode
+run_bulk_audio.bat --continuous --no-prompt
+```
+
+**Key Benefits:**
+- ✅ **Parallel transfer** - All devices transfer simultaneously
+- ✅ **Huge time savings** - Transfer to N devices in the time of 1
+- ✅ **Auto-detection** - Automatically finds all connected AutoTQ devices
+- ✅ **Progress tracking** - Shows status for each device independently
+- ✅ **Batch processing** - Transfer to multiple batches in sequence
+- ⚡ **Production optimized** - Ideal for high-volume manufacturing
+
+**Use Cases:**
+- Manufacturing lines with multiple programming stations
+- Batch programming sessions (program 5-10 devices at once)
+- Time-critical production schedules
+- Quality control stations (re-transfer audio to multiple devices)
+
 ### Batch Scripts (Tested - Windows)
 For the easiest experience:
 ```cmd
@@ -291,8 +355,11 @@ D:\AutoTQDCSProgramming\
 ├── autotq_setup.log               # Setup log
 ├── autotq_programmer.py           # ⭐ Main programming tool
 ├── autotq_setup.py                # ⭐ Setup/update tool
+├── autotq_bulk_audio_transfer.py  # ⚡ NEW: Bulk audio transfer (parallel)
 ├── setup_and_program.bat          # ⭐ Windows batch script
-└── setup_and_program.sh           # Linux/Mac script
+├── setup_and_program.sh           # Linux/Mac script
+├── run_bulk_audio.bat             # ⚡ NEW: Bulk audio batch script (Windows)
+└── run_bulk_audio.ps1             # ⚡ NEW: Bulk audio PowerShell script
 ```
 
 ## 🔒 Version Control & Security
