@@ -204,7 +204,10 @@ def ensure_ppk_on(mv: int = 4200) -> None:
         pass
 
 
-def prompt_enter_or_skip(message: str) -> bool:
+def prompt_enter_or_skip(message: str, auto_proceed: bool = False) -> bool:
+    if auto_proceed:
+        log(f"{message} → auto-proceeding")
+        return True
     try:
         resp = input(f"{message} (Enter to continue, 's' to skip): ").strip().lower()
         return resp != 's'
@@ -299,6 +302,8 @@ def main() -> int:
     parser.add_argument("--url", default="https://seahorse-app-ax33h.ondigitalocean.app", help="Server URL")
     parser.add_argument("--no-ssl-verify", action="store_true", help="Disable SSL verification")
     parser.add_argument("--api-key", help="API key (X-API-Key)")
+    parser.add_argument("--auto-proceed", "-y", action="store_true", help="Auto-proceed without waiting for Enter key prompts")
+    parser.add_argument("--skip-audio", action="store_true", help="Skip audio file transfer")
     args = parser.parse_args()
 
     while True:
@@ -323,11 +328,12 @@ def main() -> int:
         ppk = wait_for_ppk()
         if not ppk:
             log("❌ PPK not detected. Please connect the Nordic PPK2 and press Enter to retry.")
-            try:
-                input()
-            except Exception:
-                pass
-            ppk = wait_for_ppk()
+            if not args.auto_proceed:
+                try:
+                    input()
+                except Exception:
+                    pass
+                ppk = wait_for_ppk()
             if not ppk:
                 _print_summary(steps)
                 return 1
@@ -343,7 +349,7 @@ def main() -> int:
         _wait_for_usb_reenumeration()
 
         # Step 3: optional firmware programming
-        do_fw = prompt_enter_or_skip("Program firmware")
+        do_fw = prompt_enter_or_skip("Program firmware", auto_proceed=args.auto_proceed)
         fw_ok = True
         if do_fw:
             t0 = time.perf_counter()
@@ -356,7 +362,11 @@ def main() -> int:
             steps.append(("Firmware programmed (skipped)", True, 0.0))
 
         # Step 4: optional audio transfer
-        do_audio = prompt_enter_or_skip("Transfer audio files")
+        if args.skip_audio:
+            do_audio = False
+            log("Transfer audio files → skipped (--skip-audio)")
+        else:
+            do_audio = prompt_enter_or_skip("Transfer audio files", auto_proceed=args.auto_proceed)
         audio_ok = True
         if do_audio:
             t0 = time.perf_counter()
@@ -368,10 +378,13 @@ def main() -> int:
         else:
             steps.append(("Audio transferred (skipped)", True, 0.0))
 
-        try:
-            input("Programming stage complete. Press Enter to continue to DB creation & testing, or 's' to skip testing...")
-        except Exception:
-            pass
+        if not args.auto_proceed:
+            try:
+                input("Programming stage complete. Press Enter to continue to DB creation & testing, or 's' to skip testing...")
+            except Exception:
+                pass
+        else:
+            log("Programming stage complete → auto-proceeding to DB creation & testing")
 
         # Step 3: detect device and read info
         t0 = time.perf_counter()
@@ -398,11 +411,11 @@ def main() -> int:
         steps.append(("PCB create/update (factory)", ok_pcb, time.perf_counter() - t0))
 
         # Step 5: measurements (3x) + tests
-        do_tests = prompt_enter_or_skip("Run measurements and store tests")
+        do_tests = prompt_enter_or_skip("Run measurements and store tests", auto_proceed=args.auto_proceed)
         if not do_tests:
             steps.append(("Measurements x3 + tests (skipped)", True, 0.0))
             _print_summary(steps, total=time.perf_counter() - cycle_start)
-            if _prompt_next_cycle():
+            if _prompt_next_cycle(auto_proceed=args.auto_proceed):
                 break
             print("\n--- New Cycle ---\n")
             continue
@@ -420,10 +433,14 @@ def main() -> int:
         steps.append(("Measurements x3 + tests", ok_meas, time.perf_counter() - t0))
 
         # Sleep-mode power test sequence
-        try:
-            do_sleep = input("Run sleep-mode power test (Enter to continue, 's' to skip): ").strip().lower() != 's'
-        except Exception:
+        if args.auto_proceed:
+            log("Run sleep-mode power test → auto-proceeding")
             do_sleep = True
+        else:
+            try:
+                do_sleep = input("Run sleep-mode power test (Enter to continue, 's' to skip): ").strip().lower() != 's'
+            except Exception:
+                do_sleep = True
         if do_sleep:
             # Ask device to enter sleep (defer until USB unplug)
             send_sleep_command(port, seconds=0, defer_until_usb_unplug=True)
@@ -445,7 +462,7 @@ def main() -> int:
 
         _print_summary(steps, total=time.perf_counter() - cycle_start)
 
-        if _prompt_next_cycle():
+        if _prompt_next_cycle(auto_proceed=args.auto_proceed):
             break
         print("\n--- New Cycle ---\n")
     return 0
@@ -460,7 +477,11 @@ def _print_summary(steps: List[Tuple[str, bool, float]], total: Optional[float] 
         print(f"  ⏱ Total: {total:.1f}s")
 
 
-def _prompt_next_cycle() -> bool:
+def _prompt_next_cycle(auto_proceed: bool = False) -> bool:
+    if auto_proceed:
+        log("Remove PCB and insert the next one → auto-proceeding to next cycle")
+        time.sleep(2)  # Brief pause for PCB swap
+        return False
     try:
         nxt = input("Remove PCB and insert the next one, then press Enter (or 'q' to quit): ").strip().lower()
     except Exception:
