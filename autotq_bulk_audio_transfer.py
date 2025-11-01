@@ -72,15 +72,25 @@ def list_esp_ports() -> List[Tuple[str, str]]:
         return []
 
 
-def transfer_to_device(port: str, audio_dir: str, transfer_speed: str = "fast") -> DeviceTransferResult:
+def transfer_to_device(port: str, audio_dir: str, transfer_speed: str = "fast", connection_delay: float = 0) -> DeviceTransferResult:
     """
     Transfer audio files to a single device.
     This function runs in a separate thread for each device.
+    
+    Args:
+        port: Serial port to connect to
+        audio_dir: Directory containing audio files
+        transfer_speed: Transfer speed setting
+        connection_delay: Delay before attempting connection (helps with Windows port contention)
     """
     result = DeviceTransferResult(port)
     start_time = time.perf_counter()
     
     try:
+        # Stagger connection attempts to avoid Windows serial port contention
+        if connection_delay > 0:
+            time.sleep(connection_delay)
+        
         log(f"[{port}] Starting audio transfer...", Colors.OKCYAN)
         
         # Create programmer instance for this device
@@ -92,9 +102,27 @@ def transfer_to_device(port: str, audio_dir: str, transfer_speed: str = "fast") 
         except Exception:
             pass  # Use default if set_transfer_speed fails
         
-        # Connect to device
-        if not programmer.connect():
-            result.error_message = "Failed to connect to device"
+        # Connect to device with retry logic for Windows permission issues
+        connected = False
+        max_retries = 3
+        for attempt in range(max_retries):
+            try:
+                if programmer.connect():
+                    connected = True
+                    break
+                else:
+                    if attempt < max_retries - 1:
+                        log(f"[{port}] Connection attempt {attempt + 1} failed, retrying...", Colors.WARNING)
+                        time.sleep(1.0)
+            except Exception as e:
+                if "PermissionError" in str(e) and attempt < max_retries - 1:
+                    log(f"[{port}] Permission error on attempt {attempt + 1}, retrying in 1s...", Colors.WARNING)
+                    time.sleep(1.0)
+                elif attempt == max_retries - 1:
+                    raise
+        
+        if not connected:
+            result.error_message = "Failed to connect to device after retries"
             log(f"[{port}] ❌ Failed to connect", Colors.FAIL)
             return result
         
@@ -139,28 +167,34 @@ def transfer_to_device(port: str, audio_dir: str, transfer_speed: str = "fast") 
 def transfer_to_all_devices(ports: List[str], audio_dir: str, transfer_speed: str = "fast") -> List[DeviceTransferResult]:
     """
     Transfer audio files to multiple devices in parallel using threads.
+    Uses staggered connection delays to avoid Windows serial port contention issues.
     """
     if not ports:
         log("No devices to transfer to", Colors.WARNING)
         return []
     
     log(f"Starting parallel transfer to {len(ports)} device(s)...", Colors.HEADER)
+    if len(ports) > 1:
+        log("Note: Connections are staggered by 1.5s intervals to avoid Windows COM port conflicts", Colors.OKBLUE)
     
     # Store results from each thread
     results = {}
     threads = []
     
-    def worker(port: str):
-        """Worker function for thread"""
-        result = transfer_to_device(port, audio_dir, transfer_speed)
+    def worker(port: str, delay: float):
+        """Worker function for thread with staggered connection delay"""
+        result = transfer_to_device(port, audio_dir, transfer_speed, connection_delay=delay)
         results[port] = result
     
-    # Start a thread for each device
-    for port in ports:
-        thread = threading.Thread(target=worker, args=(port,), daemon=True)
+    # Start a thread for each device with staggered delays
+    # This helps avoid Windows serial port permission issues
+    for i, port in enumerate(ports):
+        # Stagger connection attempts: 0s, 1.5s, 3s, 4.5s, etc.
+        connection_delay = i * 1.5
+        thread = threading.Thread(target=worker, args=(port, connection_delay), daemon=True)
         thread.start()
         threads.append(thread)
-        time.sleep(0.2)  # Small delay between thread starts
+        time.sleep(0.1)  # Small delay between thread starts
     
     # Wait for all threads to complete
     log(f"Waiting for all {len(threads)} transfers to complete...", Colors.OKBLUE)
