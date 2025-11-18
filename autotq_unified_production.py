@@ -245,6 +245,14 @@ def program_firmware_only() -> bool:
     fw = AutoTQFirmwareProgrammer(port=port)
     ok = fw.program_device(port=port, erase_first=True, verify=False, smart_erase=True, production_mode=True)
     log(f"✔ Firmware programmed ({time.perf_counter() - t0:.1f}s)" if ok else "✖ Firmware programming failed")
+    
+    # CRITICAL FIX: Wait for port to be fully released by esptool subprocess
+    # This prevents "port busy" errors when programming multiple devices
+    if ok and port:
+        log("⏳ Waiting for serial port to be released...")
+        _wait_for_port_release(port, timeout_s=5.0)
+        time.sleep(1.0)  # Additional buffer for Windows COM port cleanup
+    
     return ok
 
 
@@ -255,6 +263,7 @@ def transfer_audio_only() -> bool:
     log("Transferring audio files...")
     t0 = time.perf_counter()
     ok = False
+    port = None
     # Prefer using the port we just detected to avoid any interactive prompts
     try:
         port = find_first_device_port()
@@ -262,13 +271,20 @@ def transfer_audio_only() -> bool:
         port = None
     if port:
         log(f"Using detected port: {port}")
-    dp = AutoTQDeviceProgrammer(port=port)
-    # Use moderately fast, reliable settings for production
+    
+    dp = None
     try:
-        dp.set_transfer_speed("fast")
-    except Exception:
-        pass
-    try:
+        dp = AutoTQDeviceProgrammer(port=port, stabilize_ms=0)  # Reduce initial stabilize delay
+        # Use moderately fast, reliable settings for production
+        try:
+            dp.set_transfer_speed("fast")
+        except Exception:
+            pass
+        
+        # Wait briefly for port to be accessible
+        if port and not _wait_for_port_available(port, timeout_s=3.0):
+            log("⚠️ Port may not be ready, attempting connection anyway...")
+        
         if dp.connect():
             successful, failed = dp.transfer_required_files(skip_existing=False)
             ok = failed == 0
@@ -276,10 +292,15 @@ def transfer_audio_only() -> bool:
             log("✖ Failed to connect to device for audio transfer")
             ok = False
     finally:
-        try:
-            dp.disconnect()
-        except Exception:
-            pass
+        if dp:
+            try:
+                dp.disconnect()
+            except Exception:
+                pass
+        # CRITICAL FIX: Ensure serial port is fully released
+        if port:
+            time.sleep(0.5)  # Brief pause for port cleanup
+    
     log(f"✔ Audio transferred ({time.perf_counter() - t0:.1f}s)" if ok else "✖ Audio transfer failed")
     return ok
 
@@ -293,8 +314,59 @@ def read_mac_and_versions(port: str) -> Tuple[str, Optional[str], Optional[str]]
 
 
 def find_first_device_port() -> Optional[str]:
-    ports = _list_esp_ports()
-    return ports[0] if ports else None
+    """Find first available ESP device port with retry logic."""
+    max_retries = 3
+    for attempt in range(max_retries):
+        ports = _list_esp_ports()
+        if ports:
+            return ports[0]
+        if attempt < max_retries - 1:
+            log(f"⚠️ No device detected (attempt {attempt + 1}/{max_retries}), refreshing...")
+            _force_port_refresh()
+            time.sleep(0.5)
+    return None
+
+
+def _wait_for_port_release(port: str, timeout_s: float = 5.0) -> bool:
+    """Wait for a serial port to be released by checking if we can open it."""
+    import serial as ser
+    deadline = time.time() + timeout_s
+    while time.time() < deadline:
+        try:
+            # Try to briefly open the port to verify it's released
+            test = ser.Serial(port, 115200, timeout=0.5)
+            test.close()
+            time.sleep(0.1)  # Brief pause after successful check
+            return True
+        except (ser.SerialException, OSError):
+            # Port still busy or not accessible
+            time.sleep(0.2)
+    return False
+
+
+def _wait_for_port_available(port: str, timeout_s: float = 3.0) -> bool:
+    """Wait for a serial port to become available."""
+    import serial as ser
+    deadline = time.time() + timeout_s
+    while time.time() < deadline:
+        try:
+            test = ser.Serial(port, 115200, timeout=0.5)
+            test.close()
+            return True
+        except (ser.SerialException, OSError):
+            time.sleep(0.25)
+    return False
+
+
+def _force_port_refresh():
+    """Force Windows to refresh COM port enumeration by scanning ports."""
+    try:
+        # Simply enumerating ports forces Windows to refresh its cache
+        from serial.tools import list_ports
+        list(list_ports.comports())
+        time.sleep(0.2)
+    except Exception:
+        pass
 
 
 def main() -> int:
@@ -478,15 +550,23 @@ def _print_summary(steps: List[Tuple[str, bool, float]], total: Optional[float] 
 
 
 def _prompt_next_cycle(auto_proceed: bool = False) -> bool:
+    """Prompt for next device and ensure proper cleanup between cycles."""
     if auto_proceed:
         log("Remove PCB and insert the next one → auto-proceeding to next cycle")
-        time.sleep(2)  # Brief pause for PCB swap
-        return False
-    try:
-        nxt = input("Remove PCB and insert the next one, then press Enter (or 'q' to quit): ").strip().lower()
-    except Exception:
-        nxt = ''
-    return nxt == 'q'
+        time.sleep(3)  # Longer pause for PCB swap and port cleanup
+    else:
+        try:
+            nxt = input("Remove PCB and insert the next one, then press Enter (or 'q' to quit): ").strip().lower()
+            if nxt == 'q':
+                return True
+        except Exception:
+            pass
+    
+    # CRITICAL FIX: Force port re-enumeration and cleanup before next device
+    log("🔄 Refreshing port enumeration...")
+    _force_port_refresh()
+    time.sleep(1.0)  # Additional buffer for Windows COM subsystem
+    return False
 
 
 # Import measure helpers from quick_check without re-defining

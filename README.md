@@ -241,6 +241,7 @@ run_bulk_audio.bat --continuous --no-prompt
 - ✅ **Auto-detection** - Automatically finds all connected AutoTQ devices
 - ✅ **Progress tracking** - Shows status for each device independently
 - ✅ **Batch processing** - Transfer to multiple batches in sequence
+- ✅ **Windows optimized** - Staggered connections to avoid COM port conflicts
 - ⚡ **Production optimized** - Ideal for high-volume manufacturing
 
 **Use Cases:**

@@ -434,9 +434,21 @@ class AutoTQDeviceProgrammer:
             self.reader_thread.join(timeout=2)
             
         if self.serial_port and self.serial_port.is_open:
-            self.serial_port.close()
+            try:
+                # Flush buffers before closing
+                self.serial_port.reset_input_buffer()
+                self.serial_port.reset_output_buffer()
+            except Exception:
+                pass
+            try:
+                self.serial_port.close()
+            except Exception:
+                pass
             self.is_connected = False
             self.log("🔌 Serial connection closed")
+        
+        # Brief pause to ensure OS releases the port
+        time.sleep(0.3)
 
     def transfer_file_to_device(self, file_path: Path, show_progress: bool = True) -> bool:
         """

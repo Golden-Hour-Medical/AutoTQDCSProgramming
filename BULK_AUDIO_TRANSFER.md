@@ -152,6 +152,22 @@ Average time per device: 26.9s
 4. Check USB cable quality
 5. Try a slower transfer speed: `--speed normal`
 
+### Permission Errors on Windows
+**Problem:** `PermissionError(13, 'The device does not recognize the command.')`
+
+**What it means:** Windows COM port conflict when opening multiple serial ports simultaneously
+
+**Solutions (Already Built-In):**
+1. ✅ Tool automatically staggers connections (1.5s intervals)
+2. ✅ Built-in retry logic (3 attempts per device)
+3. ✅ Each device gets its own dedicated thread
+
+**If still occurring:**
+1. Close any other programs using COM ports (Arduino IDE, PuTTY, etc.)
+2. Reduce number of simultaneous devices
+3. Try unplugging/replugging devices
+4. Restart computer to clear COM port locks
+
 ### Transfer Too Slow
 **Problem:** Transfer seems slower than expected
 
@@ -173,12 +189,16 @@ Average time per device: 26.9s
 ### How Parallel Transfer Works
 1. Main thread detects all connected ESP32/AutoTQ devices
 2. Spawns one worker thread per device
-3. Each thread independently:
-   - Connects to its assigned device
+3. Connections are **staggered** (1.5s intervals) to avoid Windows COM port conflicts
+4. Each thread independently:
+   - Waits for its staggered connection delay
+   - Connects to its assigned device (with retry logic)
    - Transfers all required audio files
    - Reports progress and results
-4. Main thread waits for all workers to complete
-5. Displays consolidated summary
+5. Main thread waits for all workers to complete
+6. Displays consolidated summary
+
+**Important:** On Windows, attempting to open multiple serial ports simultaneously can cause permission errors. The tool automatically staggers connection attempts to avoid this issue. The first device connects immediately, the second after 1.5s, the third after 3s, etc. This adds a small initial delay but ensures reliable connections.
 
 ### Thread Safety
 - Each device has its own serial port connection
