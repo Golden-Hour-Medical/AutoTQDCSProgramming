@@ -235,13 +235,24 @@ def program_firmware_only() -> bool:
     log("")
     log("Programming firmware...")
     t0 = time.perf_counter()
+    
     # Prefer using the port we just detected to avoid any interactive prompts
     try:
         port = find_first_device_port()
     except Exception:
         port = None
-    if port:
-        log(f"Using detected port: {port}")
+    
+    if not port:
+        log("❌ No device port detected")
+        return False
+    
+    log(f"Using detected port: {port}")
+    
+    # CRITICAL FIX: Clean up any stale port handles before programming
+    # This fixes "ClearCommError" and "PermissionError" issues on Windows
+    if not _cleanup_stale_port(port):
+        log("⚠️ Port may be in use by another process. Attempting anyway...")
+    
     fw = AutoTQFirmwareProgrammer(port=port)
     ok = fw.program_device(port=port, erase_first=True, verify=False, smart_erase=True, production_mode=True)
     log(f"✔ Firmware programmed ({time.perf_counter() - t0:.1f}s)" if ok else "✖ Firmware programming failed")
@@ -369,6 +380,48 @@ def _force_port_refresh():
         pass
 
 
+def _cleanup_stale_port(port: str, max_attempts: int = 3) -> bool:
+    """
+    Clean up stale port handles that cause ClearCommError on Windows.
+    
+    This fixes the "PermissionError(13, 'The device does not recognize the command.')"
+    error that occurs when a port has stale handles from previous sessions.
+    """
+    import serial as ser
+    
+    for attempt in range(max_attempts):
+        try:
+            # Try to open and immediately close to flush any stale handles
+            test = ser.Serial()
+            test.port = port
+            test.baudrate = 115200
+            test.timeout = 0.5
+            
+            try:
+                test.open()
+                test.setDTR(False)
+                test.setRTS(False)
+                time.sleep(0.1)
+                test.close()
+                time.sleep(0.2)
+                return True
+            except Exception:
+                if test.is_open:
+                    try:
+                        test.close()
+                    except Exception:
+                        pass
+                if attempt < max_attempts - 1:
+                    log(f"⚠️ Port cleanup attempt {attempt + 1} failed, retrying...")
+                    time.sleep(0.5)
+        except Exception as e:
+            if attempt < max_attempts - 1:
+                log(f"⚠️ Port cleanup attempt {attempt + 1} failed: {e}")
+                time.sleep(0.5)
+    
+    return False
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="AutoTQ Unified Production Tool")
     parser.add_argument("--url", default="https://seahorse-app-ax33h.ondigitalocean.app", help="Server URL")
@@ -376,6 +429,7 @@ def main() -> int:
     parser.add_argument("--api-key", help="API key (X-API-Key)")
     parser.add_argument("--auto-proceed", "-y", action="store_true", help="Auto-proceed without waiting for Enter key prompts")
     parser.add_argument("--skip-audio", action="store_true", help="Skip audio file transfer")
+    parser.add_argument("--force-port-cleanup", action="store_true", help="Force aggressive port cleanup (helps with Windows port issues)")
     args = parser.parse_args()
 
     while True:
@@ -419,6 +473,10 @@ def main() -> int:
         log("")
         log("Place PCB into jig, then unplug/re-plug the AutoTQ USB.")
         _wait_for_usb_reenumeration()
+        
+        # CRITICAL FIX: Force port refresh and cleanup after enumeration
+        _force_port_refresh()
+        time.sleep(0.5)
 
         # Step 3: optional firmware programming
         do_fw = prompt_enter_or_skip("Program firmware", auto_proceed=args.auto_proceed)
