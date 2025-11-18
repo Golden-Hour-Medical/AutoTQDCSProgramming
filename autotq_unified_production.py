@@ -251,7 +251,30 @@ def program_firmware_only() -> bool:
     # CRITICAL FIX: Clean up any stale port handles before programming
     # This fixes "ClearCommError" and "PermissionError" issues on Windows
     if not _cleanup_stale_port(port):
-        log("⚠️ Port may be in use by another process. Attempting anyway...")
+        log("⚠️ Port cleanup failed!")
+        log("❓ Do you want to:")
+        log("   [1] Retry after unplugging/replugging device (RECOMMENDED)")
+        log("   [2] Attempt programming anyway")
+        log("   [3] Skip this device")
+        try:
+            choice = input("Enter choice (1-3): ").strip()
+            if choice == "1":
+                log("📌 Please unplug the USB device now...")
+                time.sleep(2)
+                log("📌 Wait 3 seconds...")
+                time.sleep(3)
+                log("📌 Now plug the device back in...")
+                time.sleep(3)
+                log("🔄 Retrying cleanup...")
+                if not _cleanup_stale_port(port):
+                    log("❌ Cleanup still failed. Skipping device.")
+                    return False
+            elif choice == "3":
+                log("⏭️ Skipping device")
+                return False
+            # choice == "2" or anything else falls through to attempt anyway
+        except Exception:
+            log("⚠️ Using default: attempting anyway...")
     
     fw = AutoTQFirmwareProgrammer(port=port)
     ok = fw.program_device(port=port, erase_first=True, verify=False, smart_erase=True, production_mode=True)
@@ -380,44 +403,85 @@ def _force_port_refresh():
         pass
 
 
-def _cleanup_stale_port(port: str, max_attempts: int = 3) -> bool:
+def _cleanup_stale_port(port: str, max_attempts: int = 5) -> bool:
     """
-    Clean up stale port handles that cause ClearCommError on Windows.
+    Aggressively clean up stale port handles that cause ClearCommError on Windows.
     
     This fixes the "PermissionError(13, 'The device does not recognize the command.')"
     error that occurs when a port has stale handles from previous sessions.
     """
     import serial as ser
     
+    log(f"🔧 Attempting to clean up port {port}...")
+    
+    # First, try to detect if port is accessible at all
     for attempt in range(max_attempts):
         try:
-            # Try to open and immediately close to flush any stale handles
+            # Strategy: Open with minimal settings, no handshaking
             test = ser.Serial()
             test.port = port
-            test.baudrate = 115200
+            test.baudrate = 9600  # Use slower speed for cleanup
             test.timeout = 0.5
+            test.write_timeout = 0.5
+            test.inter_byte_timeout = None
+            test.xonxoff = False
+            test.rtscts = False
+            test.dsrdtr = False
+            
+            # Disable all control lines before opening
+            try:
+                test.dtr = False
+                test.rts = False
+            except Exception:
+                pass
             
             try:
                 test.open()
-                test.setDTR(False)
-                test.setRTS(False)
-                time.sleep(0.1)
+                # Successfully opened, now cycle control lines to reset device state
+                try:
+                    test.setDTR(False)
+                    test.setRTS(False)
+                    time.sleep(0.05)
+                    test.reset_input_buffer()
+                    test.reset_output_buffer()
+                    time.sleep(0.05)
+                except Exception:
+                    pass
                 test.close()
-                time.sleep(0.2)
+                time.sleep(0.3)  # Give Windows time to release
+                log(f"✅ Port {port} cleanup successful (attempt {attempt + 1})")
                 return True
-            except Exception:
+            except Exception as e:
                 if test.is_open:
                     try:
                         test.close()
                     except Exception:
                         pass
+                
                 if attempt < max_attempts - 1:
-                    log(f"⚠️ Port cleanup attempt {attempt + 1} failed, retrying...")
-                    time.sleep(0.5)
+                    log(f"⚠️ Port cleanup attempt {attempt + 1}/{max_attempts} failed: {type(e).__name__}")
+                    # Exponential backoff
+                    wait_time = 0.5 * (attempt + 1)
+                    log(f"⏳ Waiting {wait_time:.1f}s before retry...")
+                    time.sleep(wait_time)
+                else:
+                    log(f"❌ Port cleanup failed after {max_attempts} attempts: {e}")
         except Exception as e:
             if attempt < max_attempts - 1:
-                log(f"⚠️ Port cleanup attempt {attempt + 1} failed: {e}")
-                time.sleep(0.5)
+                log(f"⚠️ Port cleanup attempt {attempt + 1}/{max_attempts} failed: {type(e).__name__}")
+                wait_time = 0.5 * (attempt + 1)
+                time.sleep(wait_time)
+            else:
+                log(f"❌ Cannot access port {port}: {e}")
+    
+    # Last resort: check if something else has it open
+    log(f"❌ Port {port} is not accessible - may be held by another process")
+    log(f"💡 Try these steps:")
+    log(f"   1. Unplug the USB device")
+    log(f"   2. Close any other programs that might be using the port")
+    log(f"   3. Wait 3 seconds")
+    log(f"   4. Plug the USB device back in")
+    log(f"   5. Try again")
     
     return False
 
