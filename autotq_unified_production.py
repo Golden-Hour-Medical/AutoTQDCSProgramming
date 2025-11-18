@@ -246,7 +246,29 @@ def program_firmware_only() -> bool:
         log("❌ No device port detected")
         return False
     
-    log(f"Using detected port: {port}")
+    log(f"📍 Target port: {port}")
+    
+    # Verify port actually exists before attempting cleanup
+    if not _verify_port_exists(port):
+        log(f"❌ Port {port} does not exist in the system!")
+        log("💡 The device may have:")
+        log("   1. Been unplugged")
+        log("   2. Changed port numbers")
+        log("   3. Failed to enumerate")
+        log("")
+        log("🔍 Searching for any available ESP32 devices...")
+        _force_port_refresh()
+        time.sleep(1.0)
+        
+        # Try to find any ESP device
+        alternate_port = find_first_device_port(wait_for_device=True, timeout_s=15.0)
+        if alternate_port and alternate_port != port:
+            log(f"✅ Found device on different port: {alternate_port}")
+            port = alternate_port
+        else:
+            log("❌ No ESP32 devices found")
+            log("🔌 Please plug in the device and try again")
+            return False
     
     # CRITICAL FIX: Clean up any stale port handles before programming
     # This fixes "ClearCommError" and "PermissionError" issues on Windows
@@ -347,18 +369,67 @@ def read_mac_and_versions(port: str) -> Tuple[str, Optional[str], Optional[str]]
     return mac, fw, hw
 
 
-def find_first_device_port() -> Optional[str]:
-    """Find first available ESP device port with retry logic."""
+def find_first_device_port(wait_for_device: bool = True, timeout_s: float = 15.0) -> Optional[str]:
+    """Find first available ESP device port with retry logic and optional wait."""
     max_retries = 3
+    
     for attempt in range(max_retries):
         ports = _list_esp_ports()
         if ports:
-            return ports[0]
+            port = ports[0]
+            # Verify the port actually exists in the system
+            if _verify_port_exists(port):
+                return port
+            else:
+                log(f"⚠️ Port {port} detected but not accessible, refreshing...")
+        
         if attempt < max_retries - 1:
             log(f"⚠️ No device detected (attempt {attempt + 1}/{max_retries}), refreshing...")
             _force_port_refresh()
             time.sleep(0.5)
+    
+    # If still no port and wait is requested, wait for device to be plugged in
+    if wait_for_device and not ports:
+        log("❌ No device detected!")
+        log("💡 Please ensure the AutoTQ device is plugged in via USB")
+        log(f"⏳ Waiting up to {timeout_s:.0f} seconds for device to appear...")
+        
+        deadline = time.time() + timeout_s
+        last_log = 0
+        while time.time() < deadline:
+            ports = _list_esp_ports()
+            if ports:
+                port = ports[0]
+                if _verify_port_exists(port):
+                    log(f"✅ Device appeared on {port}!")
+                    time.sleep(0.5)  # Brief settle time
+                    return port
+            
+            # Log progress every 3 seconds
+            elapsed = time.time() - (deadline - timeout_s)
+            if int(elapsed) - last_log >= 3:
+                remaining = int(deadline - time.time())
+                log(f"⏳ Still waiting... ({remaining}s remaining)")
+                last_log = int(elapsed)
+            
+            time.sleep(0.5)
+        
+        log("❌ Timeout waiting for device")
+    
     return None
+
+
+def _verify_port_exists(port: str) -> bool:
+    """Verify that a port actually exists in the Windows system."""
+    try:
+        from serial.tools import list_ports
+        all_ports = [p.device for p in list_ports.comports()]
+        exists = port in all_ports
+        if not exists:
+            log(f"⚠️ Port {port} not found in system port list")
+        return exists
+    except Exception:
+        return True  # If we can't check, assume it exists
 
 
 def _wait_for_port_release(port: str, timeout_s: float = 5.0) -> bool:
@@ -535,12 +606,26 @@ def main() -> int:
         except Exception:
             pass
         log("")
-        log("Place PCB into jig, then unplug/re-plug the AutoTQ USB.")
+        log("📌 Place PCB into jig, then unplug/re-plug the AutoTQ USB.")
+        log("   (This ensures clean enumeration)")
         _wait_for_usb_reenumeration()
         
         # CRITICAL FIX: Force port refresh and cleanup after enumeration
         _force_port_refresh()
         time.sleep(0.5)
+        
+        # Verify device is actually present
+        log("🔍 Verifying device presence...")
+        test_port = find_first_device_port(wait_for_device=True, timeout_s=10.0)
+        if not test_port:
+            log("❌ No device detected after re-enumeration!")
+            log("💡 Please check:")
+            log("   1. Device is plugged into USB")
+            log("   2. USB cable is working")
+            log("   3. Device appears in Device Manager")
+            _print_summary(steps)
+            return 1
+        log(f"✅ Device confirmed on {test_port}")
 
         # Step 3: optional firmware programming
         do_fw = prompt_enter_or_skip("Program firmware", auto_proceed=args.auto_proceed)
