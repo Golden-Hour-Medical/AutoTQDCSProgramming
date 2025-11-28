@@ -35,27 +35,23 @@ class AutoTQClient:
         self._load_api_key()
     
     def _load_api_key(self) -> None:
-        """Load API key from common locations. Prefer JSON; fall back to plaintext."""
+        """Load API key from autotq_token.json in common locations."""
         candidates = []
         # Project directory
-        candidates.append(("autotq_token.json", "json"))
-        candidates.append((".autotq_api_key", "text"))
+        candidates.append("autotq_token.json")
         # Home directory
         home = os.path.expanduser("~")
         if home and os.path.isdir(home):
-            candidates.append((os.path.join(home, ".autotq_token.json"), "json"))
-            candidates.append((os.path.join(home, ".autotq_api_key"), "text"))
-            candidates.append((os.path.join(home, ".autotq", "autotq_token.json"), "json"))
-            candidates.append((os.path.join(home, ".autotq", "api_key.txt"), "text"))
+            candidates.append(os.path.join(home, ".autotq_token.json"))
+            candidates.append(os.path.join(home, ".autotq", "autotq_token.json"))
         # APPDATA on Windows
         appdata = os.environ.get("APPDATA")
         if appdata:
-            candidates.append((os.path.join(appdata, "AutoTQ", "autotq_token.json"), "json"))
-            candidates.append((os.path.join(appdata, "AutoTQ", "api_key.txt"), "text"))
+            candidates.append(os.path.join(appdata, "AutoTQ", "autotq_token.json"))
 
-        for path, kind in candidates:
+        for path in candidates:
             try:
-                if kind == "json" and os.path.exists(path):
+                if os.path.exists(path):
                     with open(path, 'r') as f:
                         data = json.load(f)
                         api_key = data.get('api_key')
@@ -64,69 +60,48 @@ class AutoTQClient:
                             self.session.headers.update({'X-API-Key': self.api_key})
                             print(f"📝 Loaded existing API key from {path}")
                             return
-                        # silently ignore legacy bearer-only files; try next candidate
-                elif kind == "text" and os.path.exists(path):
-                    with open(path, 'r') as f:
-                        api_key = (f.read() or "").strip()
-                        if api_key:
-                            self.api_key = api_key
-                            self.session.headers.update({'X-API-Key': self.api_key})
-                            print(f"📝 Loaded existing API key from {path}")
-                            return
+                        # Check for legacy bearer token
+                        if data.get('access_token') and not data.get('api_key'):
+                            print("ℹ️  Legacy bearer token found but API now uses X-API-Key. Please run 'python autotq_login.py' to generate an API key.")
             except Exception:
                 # Ignore errors and continue to next candidate
                 continue
-        # If we get here and a legacy token exists in project token, print a one-time note
-        try:
-            proj_token = "autotq_token.json"
-            if os.path.exists(proj_token):
-                with open(proj_token, 'r') as f:
-                    data = json.load(f)
-                    if data.get('access_token') and not data.get('api_key'):
-                        print("ℹ️  Legacy bearer token found but API now uses X-API-Key. Please provide an API key.")
-        except Exception:
-            pass
 
     def _save_api_key(self, api_key: str) -> None:
-        """Persist API key to JSON and plaintext in best-available writable location."""
+        """Persist API key to autotq_token.json in best-available writable location."""
         payload = {"api_key": api_key, "saved_at": datetime.utcnow().isoformat() + "Z"}
         tried = []
         # Preference order: project dir, ~/.autotq, %APPDATA%/AutoTQ
         targets = []
-        targets.append(("autotq_token.json", ".autotq_api_key"))
+        targets.append("autotq_token.json")
         home = os.path.expanduser("~")
         if home and os.path.isdir(home):
             homedir = os.path.join(home, ".autotq")
-            targets.append((os.path.join(home, ".autotq_token.json"), os.path.join(home, ".autotq_api_key")))
-            targets.append((os.path.join(homedir, "autotq_token.json"), os.path.join(homedir, "api_key.txt")))
+            targets.append(os.path.join(home, ".autotq_token.json"))
+            targets.append(os.path.join(homedir, "autotq_token.json"))
         appdata = os.environ.get("APPDATA")
         if appdata:
             appdir = os.path.join(appdata, "AutoTQ")
-            targets.append((os.path.join(appdir, "autotq_token.json"), os.path.join(appdir, "api_key.txt")))
+            targets.append(os.path.join(appdir, "autotq_token.json"))
 
         saved_any = False
-        for json_path, key_path in targets:
+        for json_path in targets:
             try:
                 # ensure directory exists
                 jd = os.path.dirname(json_path)
-                kd = os.path.dirname(key_path)
                 if jd and not os.path.exists(jd):
                     os.makedirs(jd, exist_ok=True)
-                if kd and not os.path.exists(kd):
-                    os.makedirs(kd, exist_ok=True)
                 with open(json_path, 'w') as f:
                     json.dump(payload, f, indent=2)
-                with open(key_path, 'w') as f:
-                    f.write(api_key.strip() + "\n")
-                print(f"💾 Saved API key to {json_path} and {key_path}")
+                print(f"💾 Saved API key to {json_path}")
                 saved_any = True
                 break
             except Exception as e:
-                tried.append((json_path, key_path, str(e)))
+                tried.append((json_path, str(e)))
                 continue
         if not saved_any:
-            for j, k, err in tried:
-                print(f"⚠️  Warning: Could not write {j} / {k}: {err}")
+            for path, err in tried:
+                print(f"⚠️  Warning: Could not write {path}: {err}")
     
     def set_api_key(self, api_key: Optional[str] = None, prompt_if_missing: bool = True) -> bool:
         """Set the API key, verify it by requesting the current user, and store in session headers.

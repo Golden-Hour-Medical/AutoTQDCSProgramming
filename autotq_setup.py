@@ -63,7 +63,8 @@ class AutoTQSetup:
         self.audio_dir = self.output_dir / "audio"
         self.manifest_file = self.output_dir / "autotq_manifest.json"
         self.credentials_file = self.output_dir / ".autotq_credentials"  # legacy (username/password)
-        self.api_key_file = self.output_dir / ".autotq_api_key"
+        self.api_key_file = self.output_dir / ".autotq_api_key_encrypted"  # encrypted storage
+        self.api_key_json_file = self.output_dir / "autotq_token.json"  # plain JSON storage
         self.lock_file = self.output_dir / "autotq_setup.lock"
         
         # Platform detection
@@ -340,46 +341,17 @@ class AutoTQSetup:
             return False
 
     def save_api_key(self, api_key: str) -> bool:
-        """Securely save API key for future use"""
-        if not HAS_CRYPTO:
-            self.log("Cryptography not available, cannot save API key", "WARNING")
-            return False
+        """Save API key to autotq_token.json"""
         try:
-            try:
-                if self.current_platform == "windows":
-                    user = os.environ.get('USERNAME') or os.environ.get('USER') or 'default'
-                else:
-                    user = os.getlogin()
-            except OSError:
-                user = os.environ.get('USER') or os.environ.get('USERNAME') or 'default'
-
-            system_info = f"{user}-{platform.node()}-autotq"
-            key = self._get_encryption_key(system_info)
-            fernet = Fernet(key)
-
             payload = {
                 'api_key': api_key,
-                'saved_at': datetime.now().isoformat(),
-                'platform': self.current_platform
+                'saved_at': datetime.now().isoformat() + "Z"
             }
-            encrypted_data = fernet.encrypt(json.dumps(payload).encode())
 
-            with open(self.api_key_file, 'wb') as f:
-                f.write(encrypted_data)
+            with open(self.api_key_json_file, 'w') as f:
+                json.dump(payload, f, indent=2)
 
-            if self.current_platform != "windows":
-                try:
-                    os.chmod(self.api_key_file, 0o600)
-                except Exception as e:
-                    self.log(f"Could not set file permissions: {e}", "WARNING")
-            else:
-                try:
-                    import subprocess
-                    subprocess.run(["attrib", "+H", str(self.api_key_file)], capture_output=True, check=False)
-                except Exception:
-                    pass
-
-            self.log("API key saved securely", "SUCCESS")
+            self.log(f"API key saved to {self.api_key_json_file}", "SUCCESS")
             return True
         except Exception as e:
             self.log(f"Could not save API key: {e}", "WARNING")
@@ -418,30 +390,43 @@ class AutoTQSetup:
             return None
 
     def load_api_key(self) -> Optional[str]:
-        """Load saved API key"""
-        if not HAS_CRYPTO or not self.api_key_file.exists():
-            return None
-        try:
+        """Load saved API key from autotq_token.json or encrypted storage"""
+        # First try plain JSON file (preferred, created by autotq_login.py)
+        if self.api_key_json_file.exists():
             try:
-                if self.current_platform == "windows":
-                    user = os.environ.get('USERNAME') or os.environ.get('USER') or 'default'
-                else:
-                    user = os.getlogin()
-            except OSError:
-                user = os.environ.get('USER') or os.environ.get('USERNAME') or 'default'
+                with open(self.api_key_json_file, 'r') as f:
+                    data = json.load(f)
+                    api_key = data.get('api_key')
+                    if api_key:
+                        self.log(f"Loaded API key from {self.api_key_json_file}", "INFO")
+                        return api_key
+            except Exception as e:
+                self.log(f"Could not load API key from JSON: {e}", "WARNING")
+        
+        # Fall back to encrypted storage (legacy)
+        if HAS_CRYPTO and self.api_key_file.exists():
+            try:
+                try:
+                    if self.current_platform == "windows":
+                        user = os.environ.get('USERNAME') or os.environ.get('USER') or 'default'
+                    else:
+                        user = os.getlogin()
+                except OSError:
+                    user = os.environ.get('USER') or os.environ.get('USERNAME') or 'default'
 
-            system_info = f"{user}-{platform.node()}-autotq"
-            key = self._get_encryption_key(system_info)
-            fernet = Fernet(key)
+                system_info = f"{user}-{platform.node()}-autotq"
+                key = self._get_encryption_key(system_info)
+                fernet = Fernet(key)
 
-            with open(self.api_key_file, 'rb') as f:
-                encrypted_data = f.read()
-            decrypted = fernet.decrypt(encrypted_data)
-            payload = json.loads(decrypted.decode())
-            return payload.get('api_key')
-        except Exception as e:
-            self.log(f"Could not load saved API key: {e}", "WARNING")
-            return None
+                with open(self.api_key_file, 'rb') as f:
+                    encrypted_data = f.read()
+                decrypted = fernet.decrypt(encrypted_data)
+                payload = json.loads(decrypted.decode())
+                return payload.get('api_key')
+            except Exception as e:
+                self.log(f"Could not load encrypted API key: {e}", "WARNING")
+        
+        return None
     
     def log(self, message: str, level: str = "INFO"):
         """Log a message to both console and file"""
@@ -513,7 +498,7 @@ class AutoTQSetup:
             else:
                 self.log("Saved API key is invalid, removing it", "WARNING")
                 try:
-                    self.api_key_file.unlink()
+                    self.api_key_json_file.unlink()
                 except Exception:
                     pass
 

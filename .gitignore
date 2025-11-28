@@ -175,6 +175,8 @@ autotq_setup.log
 .autotq_credentials
 .autotq_salt
 autotq_token.json
+autotq_api_key.json
+
 
 # Lock files
 autotq_setup.lock
