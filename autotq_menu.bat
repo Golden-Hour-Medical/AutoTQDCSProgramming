@@ -1,5 +1,35 @@
 @echo off
 setlocal EnableDelayedExpansion
+set PYTHONUTF8=1
+set SSL_CERT_FILE=
+set REQUESTS_CA_BUNDLE=
+
+:: Find Python - prefer venv, fall back to system python
+set PYTHON=
+if exist ".\.venv\Scripts\python.exe" (
+    set PYTHON=.\.venv\Scripts\python.exe
+) else (
+    where python >nul 2>&1
+    if %ERRORLEVEL% equ 0 (
+        set PYTHON=python
+    ) else (
+        where py >nul 2>&1
+        if %ERRORLEVEL% equ 0 (
+            set PYTHON=py
+        )
+    )
+)
+
+if "%PYTHON%"=="" (
+    echo [ERROR] Python not found!
+    echo.
+    echo Please either:
+    echo   1. Run setup_all.bat to create virtual environment
+    echo   2. Install Python 3.8+ and add to PATH
+    echo.
+    pause
+    exit /b 1
+)
 
 :MENU
 cls
@@ -109,7 +139,7 @@ echo  ============================================================
 echo   Checking Authentication...
 echo  ============================================================
 echo.
-python autotq_check_auth.py
+%PYTHON% autotq_check_auth.py
 goto PAUSE_AND_RETURN
 
 :LOGIN
@@ -119,7 +149,7 @@ echo  ============================================================
 echo   Login ^& Generate API Key
 echo  ============================================================
 echo.
-python autotq_login.py
+%PYTHON% autotq_login.py
 goto PAUSE_AND_RETURN
 
 :CHECK_AND_LOGIN
@@ -149,7 +179,7 @@ echo    - Run production tests
 echo.
 echo  Press Ctrl+C to cancel, or
 pause
-python autotq_unified_production.py
+%PYTHON% autotq_unified_production.py
 goto PAUSE_AND_RETURN
 
 :SETUP_AND_PROGRAM
@@ -177,7 +207,7 @@ echo  ============================================================
 echo.
 echo  Downloading latest firmware and audio files from server...
 echo.
-python autotq_setup.py
+%PYTHON% autotq_setup.py
 goto PAUSE_AND_RETURN
 
 :FIRMWARE_ONLY
@@ -191,7 +221,7 @@ echo  This will flash firmware to the connected device.
 echo  Audio files will NOT be transferred.
 echo.
 pause
-python autotq_firmware_programmer.py
+%PYTHON% autotq_firmware_programmer.py
 goto PAUSE_AND_RETURN
 
 :PROGRAM_DEVICE
@@ -206,7 +236,7 @@ echo    - Flash firmware to device
 echo    - Transfer all audio files
 echo.
 pause
-python autotq_programmer.py
+%PYTHON% autotq_programmer.py
 goto PAUSE_AND_RETURN
 
 :BULK_AUDIO
@@ -222,7 +252,7 @@ echo.
 echo  Connect multiple devices before continuing.
 echo.
 pause
-python autotq_bulk_audio_transfer.py
+%PYTHON% autotq_bulk_audio_transfer.py
 goto PAUSE_AND_RETURN
 
 :SINGLE_AUDIO
@@ -235,7 +265,7 @@ echo.
 echo  This will transfer audio files to ONE device.
 echo.
 pause
-python autotq_programmer.py --audio-only
+%PYTHON% autotq_programmer.py --audio-only
 goto PAUSE_AND_RETURN
 
 :DEVICE_INFO
@@ -245,7 +275,7 @@ echo  ============================================================
 echo   Device Information
 echo  ============================================================
 echo.
-python autotq_device_info.py
+%PYTHON% autotq_device_info.py
 goto PAUSE_AND_RETURN
 
 :CHECK_PORTS
@@ -255,7 +285,7 @@ echo  ============================================================
 echo   Check Serial Ports
 echo  ============================================================
 echo.
-python check_port.py
+%PYTHON% check_port.py
 goto PAUSE_AND_RETURN
 
 :QUICK_CHECK
@@ -265,7 +295,7 @@ echo  ============================================================
 echo   Quick Device Check
 echo  ============================================================
 echo.
-python autotq_quick_check.py
+%PYTHON% autotq_quick_check.py
 goto PAUSE_AND_RETURN
 
 :PCB_REPORT
@@ -275,7 +305,7 @@ echo  ============================================================
 echo   Generate PCB Report
 echo  ============================================================
 echo.
-python pcb_stage_report.py
+%PYTHON% pcb_stage_report.py
 goto PAUSE_AND_RETURN
 
 :INSTALL_DRIVERS
@@ -304,4 +334,3 @@ echo   Goodbye!
 echo  ============================================================
 echo.
 exit /b 0
-

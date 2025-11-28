@@ -1,6 +1,37 @@
 # AutoTQ Production Tools Menu
 # PowerShell version with colors
 
+$env:PYTHONUTF8 = "1"
+$env:SSL_CERT_FILE = ""
+$env:REQUESTS_CA_BUNDLE = ""
+
+# Find Python - prefer venv, fall back to system python
+$python = $null
+
+if (Test-Path ".\.venv\Scripts\python.exe") {
+    $python = ".\.venv\Scripts\python.exe"
+} else {
+    $pythonCmd = Get-Command python -ErrorAction SilentlyContinue
+    if ($pythonCmd) {
+        $python = "python"
+    } else {
+        $pyCmd = Get-Command py -ErrorAction SilentlyContinue
+        if ($pyCmd) {
+            $python = "py"
+        }
+    }
+}
+
+if (-not $python) {
+    Write-Host "[ERROR] Python not found!" -ForegroundColor Red
+    Write-Host ""
+    Write-Host "Please either:" -ForegroundColor Yellow
+    Write-Host "  1. Run setup_all.bat to create virtual environment"
+    Write-Host "  2. Install Python 3.8+ and add to PATH"
+    Write-Host ""
+    exit 1
+}
+
 function Show-Menu {
     Clear-Host
     Write-Host ""
@@ -121,10 +152,10 @@ while ($true) {
             exit 0
         }
         "1" {
-            Run-Command "Checking Authentication..." "" "python autotq_check_auth.py"
+            Run-Command "Checking Authentication..." "" "& $python autotq_check_auth.py"
         }
         "2" {
-            Run-Command "Login & Generate API Key" "" "python autotq_login.py"
+            Run-Command "Login & Generate API Key" "" "& $python autotq_login.py"
         }
         "3" {
             Run-Command "Check & Login (Auto)" "" "& .\check_and_login.ps1"
@@ -146,7 +177,7 @@ while ($true) {
             Write-Host ""
             Write-Host "  Press Ctrl+C to cancel, or press Enter to continue..." -ForegroundColor Yellow
             Read-Host
-            & python autotq_unified_production.py
+            & $python autotq_unified_production.py
             Pause-AndReturn
         }
         "5" {
@@ -166,7 +197,7 @@ while ($true) {
             Pause-AndReturn
         }
         "6" {
-            Run-Command "Setup Only (Download Files)" "Downloading latest firmware and audio files from server..." "python autotq_setup.py"
+            Run-Command "Setup Only (Download Files)" "Downloading latest firmware and audio files from server..." "& $python autotq_setup.py"
         }
         "7" {
             Clear-Host
@@ -179,7 +210,7 @@ while ($true) {
             Write-Host "  Audio files will NOT be transferred." -ForegroundColor Gray
             Write-Host ""
             Read-Host "  Press Enter to continue..."
-            & python autotq_firmware_programmer.py
+            & $python autotq_firmware_programmer.py
             Pause-AndReturn
         }
         "8" {
@@ -194,7 +225,7 @@ while ($true) {
             Write-Host "    - Transfer all audio files" -ForegroundColor Gray
             Write-Host ""
             Read-Host "  Press Enter to continue..."
-            & python autotq_programmer.py
+            & $python autotq_programmer.py
             Pause-AndReturn
         }
         "9" {
@@ -210,7 +241,7 @@ while ($true) {
             Write-Host "  Connect multiple devices before continuing." -ForegroundColor Magenta
             Write-Host ""
             Read-Host "  Press Enter to continue..."
-            & python autotq_bulk_audio_transfer.py
+            & $python autotq_bulk_audio_transfer.py
             Pause-AndReturn
         }
         "10" {
@@ -223,20 +254,20 @@ while ($true) {
             Write-Host "  This will transfer audio files to ONE device." -ForegroundColor Yellow
             Write-Host ""
             Read-Host "  Press Enter to continue..."
-            & python autotq_programmer.py --audio-only
+            & $python autotq_programmer.py --audio-only
             Pause-AndReturn
         }
         "11" {
-            Run-Command "Device Information" "" "python autotq_device_info.py"
+            Run-Command "Device Information" "" "& $python autotq_device_info.py"
         }
         "12" {
-            Run-Command "Check Serial Ports" "" "python check_port.py"
+            Run-Command "Check Serial Ports" "" "& $python check_port.py"
         }
         "13" {
-            Run-Command "Quick Device Check" "" "python autotq_quick_check.py"
+            Run-Command "Quick Device Check" "" "& $python autotq_quick_check.py"
         }
         "14" {
-            Run-Command "Generate PCB Report" "" "python pcb_stage_report.py"
+            Run-Command "Generate PCB Report" "" "& $python pcb_stage_report.py"
         }
         "15" {
             Run-Command "Install USB Drivers" "" "& .\install_drivers.bat"
@@ -248,4 +279,3 @@ while ($true) {
         }
     }
 }
-
