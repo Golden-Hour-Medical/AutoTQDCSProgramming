@@ -56,6 +56,7 @@ STATUS_FAILED = "FAILED"
 STATUS_REMOVED = "REMOVED"
 STATUS_NEEDS_BATTERY = "NEEDS_BATTERY"
 STATUS_WAITING_RETRY = "WAITING_RETRY"
+STATUS_AWAITING_SERIAL = "AWAITING_SERIAL"  # New: waiting for user to enter serial number
 
 # Status display info
 STATUS_INFO = {
@@ -70,6 +71,7 @@ STATUS_INFO = {
     STATUS_REMOVED: {"icon": "🔌", "color": "#95a5a6", "label": "Removed"},
     STATUS_NEEDS_BATTERY: {"icon": "🔋", "color": "#e74c3c", "label": "Battery Required"},
     STATUS_WAITING_RETRY: {"icon": "⏳", "color": "#f39c12", "label": "Waiting for Replug"},
+    STATUS_AWAITING_SERIAL: {"icon": "📝", "color": "#9b59b6", "label": "Enter Serial Number"},
 }
 
 class DeviceTask:
@@ -99,10 +101,17 @@ class DeviceTask:
         self.resumed_from_battery_error = False
         self.force_action = None # 'flash_firmware' or 'flash_audio' or None
         
+        # Device creation fields
+        self.serial_number = None  # 4-digit serial number entered by user
+        self.gs1_barcode = None    # 14-digit GS1 (lot + serial)
+        self.device_id = None      # Backend device ID after creation
+        self.device_api_key = None # Device API key (shown only once)
+        
         # Detailed Step Status
         self.step_firmware = "pending" # pending, skipped, flashed, failed
-        self.step_backend = "pending"  # pending, registered, failed
+        self.step_backend = "pending"  # pending, registered_new, registered_existing, failed
         self.step_audio = "pending"    # pending, skipped, transferred, failed
+        self.step_device = "pending"   # pending, created, updated, failed, awaiting_serial
 
     def to_dict(self) -> dict:
         elapsed = (self.end_time or time.time()) - self.start_time
@@ -122,6 +131,9 @@ class DeviceTask:
             "mac_address": self.mac_address,
             "battery_level": self.battery_level,
             "pcb_id": self.pcb_id,
+            "serial_number": self.serial_number,
+            "gs1_barcode": self.gs1_barcode,
+            "device_id": self.device_id,
             "files_transferred": self.files_transferred,
             "files_skipped": self.files_skipped,
             "files_total": self.files_total,
@@ -133,7 +145,8 @@ class DeviceTask:
             "steps": {
                 "firmware": self.step_firmware,
                 "backend": self.step_backend,
-                "audio": self.step_audio
+                "audio": self.step_audio,
+                "device": self.step_device
             }
         }
 
@@ -150,9 +163,15 @@ class AutoProductionManager:
         self.active_devices: Dict[str, DeviceTask] = {}
         self.completed_history: List[DeviceTask] = []
         self.pending_resumes: Dict[str, DeviceTask] = {} # Store tasks waiting for replug
+        self.port_locks: Dict[str, threading.Lock] = {} # Per-port locks to prevent concurrent access
+        self.active_threads: Dict[str, threading.Thread] = {} # Track running threads per port
         self.lock = threading.Lock()
         self.running = True
         self.stats = {"total_programmed": 0, "total_failed": 0}
+        
+        # Lot number for device creation (set via UI before starting)
+        self.lot_number = None  # 10-digit lot number
+        self.lot_number_set = False  # Whether user has confirmed lot number
         
         # Auth state
         self.auth_status = "checking" # checking, authenticated, failed, offline
@@ -205,7 +224,7 @@ class AutoProductionManager:
         try:
             with open(self.session_log_file, 'w', newline='') as f:
                 writer = csv.writer(f)
-                writer.writerow(['Timestamp', 'Port', 'MAC Address', 'PCB ID', 'Firmware', 'Status', 'Step:Firmware', 'Step:Backend', 'Step:Audio', 'Duration (s)', 'Error'])
+                writer.writerow(['Timestamp', 'Port', 'MAC Address', 'PCB ID', 'GS1 Barcode', 'Device ID', 'Firmware', 'Status', 'Step:Firmware', 'Step:Backend', 'Step:Audio', 'Step:Device', 'Duration (s)', 'Error'])
             print(f"{Colors.OKGREEN}📝 Session log initialized: {self.session_log_file}{Colors.ENDC}")
         except Exception as e:
             print(f"{Colors.FAIL}❌ Failed to init session log: {e}{Colors.ENDC}")
@@ -220,11 +239,14 @@ class AutoProductionManager:
                     task.port,
                     task.mac_address or 'Unknown',
                     task.pcb_id or 'N/A',
+                    task.gs1_barcode or 'N/A',
+                    task.device_id or 'N/A',
                     task.firmware_version or 'Unknown',
                     task.status,
                     task.step_firmware,
                     task.step_backend,
                     task.step_audio,
+                    task.step_device,
                     f"{task.end_time - task.start_time:.1f}",
                     "; ".join(task.errors) if task.errors else ""
                 ])
@@ -240,7 +262,7 @@ class AutoProductionManager:
                     time.sleep(0.1)
                     winsound.Beep(1500, 300) # Higher pitch
                 else:
-                    winsound.Beep(300, 800) # Low pitch, long
+                    winsound.Beep(300, 500) # Low pitch, long
             except Exception:
                 pass
 
@@ -456,6 +478,8 @@ class AutoProductionManager:
             "flash_enabled": self.flash_firmware_flag,
             "backend_enabled": self.register_backend,
             "production_mode": self.production_mode,
+            "lot_number": self.lot_number,
+            "lot_number_set": self.lot_number_set,
             "auth": {
                 "status": self.auth_status,
                 "user": self.auth_user,
@@ -496,36 +520,37 @@ class AutoProductionManager:
             if port in self.active_devices:
                 task = self.active_devices[port]
                 if task.status in [STATUS_COMPLETED, STATUS_FAILED, STATUS_DETECTED]: # Can only restart if done or new
-                    if not any(t.name == f"thread-{port}" and t.is_alive() for t in threading.enumerate()):
-                        # Thread is dead, we can restart
-                        print(f"{Colors.OKCYAN}[{port}] Manual action requested: {action}{Colors.ENDC}")
-                        
-                        # Reset task state
-                        task.status = STATUS_DETECTED
-                        task.message = f"Manual start: {action}"
-                        task.progress = 0
-                        task.start_time = time.time()
-                        task.end_time = 0.0
-                        task.errors = []
-                        task.force_action = action
-                        
-                        # Reset steps based on action
-                        if action == 'flash_firmware':
-                            task.firmware_flashed = False # Force re-flash
-                            task.step_firmware = "pending"
-                            task.step_audio = "pending"
-                            task.step_backend = "pending"
-                        elif action == 'flash_audio':
-                            task.step_audio = "pending"
-                            # Keep other states
-                        
-                        # Restart processing thread
-                        t = threading.Thread(target=self.process_device, args=(port, task), daemon=True, name=f"thread-{port}")
-                        t.start()
-                        return True
-                    else:
-                        print(f"{Colors.WARNING}[{port}] Cannot start manual action: Device busy{Colors.ENDC}")
+                    # Check if thread is already running (use our tracking)
+                    if port in self.active_threads and self.active_threads[port].is_alive():
+                        # Thread is still running
                         return False
+                    
+                    print(f"{Colors.OKCYAN}[{port}] Manual action requested: {action}{Colors.ENDC}")
+                    
+                    # Reset task state
+                    task.status = STATUS_DETECTED
+                    task.message = f"Manual start: {action}"
+                    task.progress = 0
+                    task.start_time = time.time()
+                    task.end_time = 0.0
+                    task.errors = []
+                    task.force_action = action
+                    
+                    # Reset steps based on action
+                    if action == 'flash_firmware':
+                        task.firmware_flashed = False # Force re-flash
+                        task.step_firmware = "pending"
+                        task.step_audio = "pending"
+                        task.step_backend = "pending"
+                    elif action == 'flash_audio':
+                        task.step_audio = "pending"
+                        # Keep other states
+                    
+                    # Restart processing thread
+                    t = threading.Thread(target=self.process_device, args=(port, task), daemon=True, name=f"thread-{port}")
+                    self.active_threads[port] = t
+                    t.start()
+                    return True
         return False
 
     def log_status(self, port: str, status: str, message: str = "", progress: int = None):
@@ -641,6 +666,44 @@ class AutoProductionManager:
                 return True
             time.sleep(0.5)
         return False
+    
+    def get_port_lock(self, port: str) -> threading.Lock:
+        """Get or create a lock for a specific port to prevent concurrent access."""
+        with self.lock:
+            if port not in self.port_locks:
+                self.port_locks[port] = threading.Lock()
+            return self.port_locks[port]
+    
+    def safe_close_port(self, programmer, delay: float = 0.5):
+        """Safely close a serial connection with delay to ensure port is released."""
+        try:
+            programmer.disconnect()
+        except Exception:
+            pass
+        time.sleep(delay) # Give OS time to fully release the port
+    
+    def is_port_busy(self, port: str) -> bool:
+        """Check if there's already an active processing thread for this port."""
+        with self.lock:
+            if port in self.active_threads:
+                thread = self.active_threads[port]
+                if thread.is_alive():
+                    return True
+                else:
+                    # Thread finished, clean up
+                    del self.active_threads[port]
+            return False
+    
+    def start_device_thread(self, port: str, task: DeviceTask):
+        """Start a processing thread for a device, with proper tracking."""
+        if self.is_port_busy(port):
+            self.log(f"[{port}] Thread already running, skipping...", "WARNING")
+            return
+        
+        t = threading.Thread(target=self.process_device, args=(port, task), daemon=True, name=f"thread-{port}")
+        with self.lock:
+            self.active_threads[port] = t
+        t.start()
         
     def register_device_backend(self, port: str, mac: str, fw_version: Optional[str], hw_version: Optional[str]) -> Tuple[Optional[int], bool]:
         if not self.client or not self.register_backend:
@@ -657,6 +720,196 @@ class AutoProductionManager:
         except Exception as e:
             self.log_status(port, STATUS_REGISTERING, f"⚠️ Backend Error: {e}")
             return None, False
+
+    def set_lot_number(self, lot_number: str) -> Tuple[bool, str]:
+        """Set the lot number for device creation. Must be exactly 10 digits."""
+        lot_number = lot_number.strip()
+        
+        # Validate format: exactly 10 digits
+        if not lot_number.isdigit():
+            return False, "Lot number must contain only digits"
+        if len(lot_number) != 10:
+            return False, f"Lot number must be exactly 10 digits (got {len(lot_number)})"
+        
+        with self.lock:
+            self.lot_number = lot_number
+            self.lot_number_set = True
+        
+        print(f"{Colors.OKGREEN}✅ Lot number set: {lot_number}{Colors.ENDC}")
+        return True, f"Lot number set to {lot_number}"
+
+    def submit_serial_number(self, port: str, serial_number: str) -> Tuple[bool, str]:
+        """Submit serial number for a device awaiting it. Creates device on backend."""
+        serial_number = serial_number.strip()
+        
+        # Validate format: exactly 4 digits
+        if not serial_number.isdigit():
+            return False, "Serial number must contain only digits"
+        if len(serial_number) != 4:
+            return False, f"Serial number must be exactly 4 digits (got {len(serial_number)})"
+        
+        if not self.lot_number:
+            return False, "Lot number not set. Please set lot number first."
+        
+        with self.lock:
+            if port not in self.active_devices:
+                return False, f"Device on {port} not found"
+            task = self.active_devices[port]
+            
+            if task.status != STATUS_AWAITING_SERIAL:
+                return False, f"Device not awaiting serial number (status: {task.status})"
+            
+            if not task.mac_address:
+                return False, "Device MAC address not available"
+        
+        # Create GS1 barcode
+        gs1_barcode = self.lot_number + serial_number
+        
+        print(f"{Colors.OKCYAN}[{port}] Creating device: GS1={gs1_barcode}, MAC={task.mac_address}{Colors.ENDC}")
+        
+        try:
+            # Step 1: Create or update device
+            success, message, device_id = self._create_device_on_backend(
+                gs1_barcode=gs1_barcode,
+                mac_address=task.mac_address,
+                port=port
+            )
+            
+            if not success:
+                task.step_device = "failed"
+                task.errors.append(f"Device creation failed: {message}")
+                self.log_status(port, STATUS_FAILED, f"Device creation failed: {message}", progress=100)
+                self._play_sound(success=False)
+                return False, message
+            
+            # Step 2: Update task
+            with self.lock:
+                task.serial_number = serial_number
+                task.gs1_barcode = gs1_barcode
+                task.device_id = device_id
+                task.step_device = "created"
+                task.needs_user_action = False
+                task.user_action_message = ""
+            
+            # Step 3: Verify device was created correctly
+            verify_success, verify_msg = self._verify_device_on_backend(gs1_barcode, task.mac_address)
+            if not verify_success:
+                task.step_device = "failed"
+                task.errors.append(f"Device verification failed: {verify_msg}")
+                self.log_status(port, STATUS_FAILED, f"Device verification failed: {verify_msg}", progress=100)
+                self._play_sound(success=False)
+                return False, verify_msg
+            
+            # Success!
+            duration = time.time() - task.start_time
+            self.log_status(port, STATUS_COMPLETED, f"Device {gs1_barcode} created! ({duration:.1f}s)", progress=100)
+            self._play_sound(success=True)
+            self._log_to_csv(task)
+            
+            with self.lock:
+                self.stats["total_programmed"] += 1
+                self.completion_times.append(duration)
+            
+            print(f"{Colors.OKGREEN}✅ [{port}] Device created: GS1={gs1_barcode}, Device ID={device_id}{Colors.ENDC}")
+            return True, f"Device {gs1_barcode} created successfully"
+            
+        except Exception as e:
+            task.step_device = "failed"
+            task.errors.append(str(e))
+            self.log_status(port, STATUS_FAILED, str(e), progress=100)
+            self._play_sound(success=False)
+            return False, str(e)
+
+    def _create_device_on_backend(self, gs1_barcode: str, mac_address: str, port: str) -> Tuple[bool, str, Optional[int]]:
+        """Create device on backend with GS1 and MAC, handling existing devices."""
+        if not self.client:
+            return False, "Backend client not initialized", None
+        
+        try:
+            # First, check if device exists
+            check_resp = self.client.session.get(
+                f"{self.client.base_url}/devices/{gs1_barcode}",
+                timeout=10
+            )
+            
+            if check_resp.status_code == 200:
+                # Device exists - update MAC if needed
+                existing = check_resp.json()
+                existing_mac = existing.get('mac_address', '')
+                
+                if existing_mac and existing_mac != mac_address:
+                    # MAC mismatch - this is a potential issue
+                    return False, f"GS1 {gs1_barcode} already exists with different MAC ({existing_mac})", None
+                
+                if not existing_mac or existing_mac != mac_address:
+                    # Update MAC address
+                    mac_resp = self.client.session.put(
+                        f"{self.client.base_url}/devices/{gs1_barcode}/mac-address",
+                        json={"mac_address": mac_address},
+                        timeout=10
+                    )
+                    if mac_resp.status_code not in [200, 201]:
+                        return False, f"Failed to associate MAC: {mac_resp.text}", None
+                
+                device_id = existing.get('id')
+                return True, "Device updated", device_id
+            
+            elif check_resp.status_code == 404:
+                # Device doesn't exist - create it
+                create_resp = self.client.session.post(
+                    f"{self.client.base_url}/devices/",
+                    json={
+                        "gs1_barcode": gs1_barcode,
+                        "model_name": "AutoTQ",
+                        "mac_address": mac_address,
+                        "inventory_status": "received_pending_review"
+                    },
+                    timeout=10
+                )
+                
+                if create_resp.status_code == 201:
+                    data = create_resp.json()
+                    device_id = data.get('id')
+                    api_key = data.get('api_key')
+                    if api_key:
+                        print(f"{Colors.WARNING}⚠️ Device API Key (save this!): {api_key}{Colors.ENDC}")
+                    return True, "Device created", device_id
+                elif create_resp.status_code == 409:
+                    return False, "Device with this GS1 already exists (conflict)", None
+                else:
+                    return False, f"Create failed ({create_resp.status_code}): {create_resp.text[:100]}", None
+            else:
+                return False, f"Check failed ({check_resp.status_code}): {check_resp.text[:100]}", None
+                
+        except requests.exceptions.RequestException as e:
+            return False, f"Network error: {str(e)}", None
+        except Exception as e:
+            return False, f"Error: {str(e)}", None
+
+    def _verify_device_on_backend(self, gs1_barcode: str, expected_mac: str) -> Tuple[bool, str]:
+        """Verify device exists on backend with correct MAC."""
+        if not self.client:
+            return False, "Backend client not initialized"
+        
+        try:
+            resp = self.client.session.get(
+                f"{self.client.base_url}/devices/{gs1_barcode}",
+                timeout=10
+            )
+            
+            if resp.status_code != 200:
+                return False, f"Device not found after creation ({resp.status_code})"
+            
+            data = resp.json()
+            actual_mac = data.get('mac_address', '')
+            
+            if actual_mac != expected_mac:
+                return False, f"MAC mismatch: expected {expected_mac}, got {actual_mac}"
+            
+            return True, "Device verified"
+            
+        except Exception as e:
+            return False, f"Verification error: {str(e)}"
 
     def handle_battery_pause(self, port: str, task: DeviceTask):
         """Handle the pause logic for battery insertion"""
@@ -676,6 +929,17 @@ class AutoProductionManager:
 
     def process_device(self, port: str, task: DeviceTask):
         # Note: task is passed in, might be a resumed task
+        
+        # Acquire per-port lock to prevent concurrent operations on the same port
+        port_lock = self.get_port_lock(port)
+        
+        # Try to acquire lock with timeout - if port is busy, wait
+        lock_acquired = port_lock.acquire(timeout=30)
+        if not lock_acquired:
+            self.log_status(port, STATUS_FAILED, "Port busy - could not acquire lock", progress=0)
+            task.status = STATUS_FAILED
+            task.errors.append("Port lock timeout - another operation in progress")
+            return
         
         try:
             # Determine what steps to run based on flags and manual overrides
@@ -699,28 +963,49 @@ class AutoProductionManager:
             # --- PHASE 0: PRE-CHECK ---
             # If not already flashed by us in this session, check if we can skip flashing
             skip_flash = False
+            pre_check_prog = None
             if do_firmware and not task.firmware_flashed and not task.resumed_from_battery_error:
                 self.log_status(port, STATUS_CONNECTING, "Checking existing firmware...", progress=2)
                 
-                # Quick connect to check version
-                pre_check_prog = AutoTQDeviceProgrammer(port=port, audio_dir=str(self.audio_dir), stabilize_ms=2000)
-                if pre_check_prog.connect():
-                    # Use new consolidated info getter
-                    info = self.get_device_info(pre_check_prog)
-                    current_fw = info.get("fw_version")
-                    pre_check_prog.disconnect()
-                    
-                    if current_fw:
-                        # Normalize version strings (remove 'v' prefix for comparison)
-                        target_v = self.firmware_version.replace('v', '') if self.firmware_version else ''
-                        current_v = current_fw.replace('v', '')
+                # Quick connect to check version (short timeout for blank devices)
+                try:
+                    pre_check_prog = AutoTQDeviceProgrammer(port=port, audio_dir=str(self.audio_dir), stabilize_ms=1500)
+                    if pre_check_prog.connect():
+                        # Use new consolidated info getter
+                        info = self.get_device_info(pre_check_prog)
+                        current_fw = info.get("fw_version")
                         
-                        if target_v and current_v == target_v:
-                            self.log_status(port, STATUS_DETECTED, f"Firmware up-to-date ({current_fw}). Skipping flash.", progress=5)
-                            skip_flash = True
-                            task.firmware_version = current_fw
-                            task.firmware_flashed = True # Treat as done
-                            task.step_firmware = "skipped"
+                        # ALWAYS close before proceeding
+                        self.safe_close_port(pre_check_prog, delay=1.0)
+                        pre_check_prog = None
+                        
+                        if current_fw:
+                            # Normalize version strings (remove 'v' prefix for comparison)
+                            target_v = self.firmware_version.replace('v', '') if self.firmware_version else ''
+                            current_v = current_fw.replace('v', '')
+                            
+                            if target_v and current_v == target_v:
+                                self.log_status(port, STATUS_DETECTED, f"Firmware up-to-date ({current_fw}). Skipping flash.", progress=5)
+                                skip_flash = True
+                                task.firmware_version = current_fw
+                                task.firmware_flashed = True # Treat as done
+                                task.step_firmware = "skipped"
+                        else:
+                            self.log_status(port, STATUS_CONNECTING, "No firmware detected. Will flash.", progress=3)
+                    else:
+                        # Could not connect - device might be blank or unresponsive
+                        self.log_status(port, STATUS_CONNECTING, "Device may be blank. Proceeding to flash.", progress=3)
+                        if pre_check_prog:
+                            self.safe_close_port(pre_check_prog, delay=0.5)
+                            pre_check_prog = None
+                except Exception as pre_e:
+                    self.log_status(port, STATUS_CONNECTING, f"Pre-check failed: {str(pre_e)[:30]}. Proceeding to flash.", progress=3)
+                    if pre_check_prog:
+                        try:
+                            self.safe_close_port(pre_check_prog, delay=0.5)
+                        except:
+                            pass
+                        pre_check_prog = None
             
             # FORCE OVERRIDE: If manual action was firmware, don't skip even if versions match
             if task.force_action == 'flash_firmware':
@@ -731,7 +1016,11 @@ class AutoProductionManager:
             # --- PHASE 1: FIRMWARE ---
             # Only flash if enabled AND NOT skipped AND NOT already flashed
             if do_firmware and not task.firmware_flashed and not skip_flash:
-                self.log_status(port, STATUS_FLASHING, "Erasing flash...", progress=5)
+                self.log_status(port, STATUS_FLASHING, "Preparing to flash...", progress=5)
+                
+                # Extra delay to ensure port is fully released from pre-check
+                time.sleep(1.0)
+                
                 try:
                     fw_prog = AutoTQFirmwareProgrammer(firmware_dir=str(self.firmware_dir), port=port)
                     target_version = 'unknown'
@@ -753,29 +1042,47 @@ class AutoProductionManager:
                     raise RuntimeError(f"Firmware flash failed: {str(e)}")
 
                 self.log_status(port, STATUS_CONNECTING, "Device rebooting...", progress=55)
-                time.sleep(1.0)
+                time.sleep(2.0) # Longer delay to ensure clean reboot
                 self.wait_for_port(port, timeout=15.0)
             elif task.resumed_from_battery_error:
                 self.log_status(port, STATUS_CONNECTING, "Resuming after battery fix...", progress=55)
 
             # --- PHASE 2: CONNECTING ---
             self.log_status(port, STATUS_CONNECTING, "Connecting to device...", progress=60)
-            dev_prog = AutoTQDeviceProgrammer(port=port, audio_dir=str(self.audio_dir), stabilize_ms=2000)
+            
+            # Wait a bit for port to stabilize after firmware flash
+            time.sleep(0.5)
+            
+            dev_prog = AutoTQDeviceProgrammer(port=port, audio_dir=str(self.audio_dir), stabilize_ms=2500)
             
             connected = False
+            last_error = None
             for i in range(5):
                 try:
                     if dev_prog.connect():
                         connected = True
                         break
-                except Exception:
+                except Exception as conn_err:
+                    last_error = str(conn_err)
+                
+                # Try to release the port before retrying
+                try:
+                    dev_prog.disconnect()
+                except:
                     pass
+                
                 if i < 4:
-                    self.log_status(port, STATUS_CONNECTING, f"Retry {i+1}...", progress=60 + i*2)
-                    time.sleep(1.5 + (i * 0.5))
+                    delay = 1.5 + (i * 0.5)
+                    self.log_status(port, STATUS_CONNECTING, f"Retry {i+1} in {delay:.1f}s...", progress=60 + i*2)
+                    time.sleep(delay)
+                    # Recreate programmer for fresh connection
+                    dev_prog = AutoTQDeviceProgrammer(port=port, audio_dir=str(self.audio_dir), stabilize_ms=2500)
             
             if not connected:
-                raise RuntimeError("Could not connect to serial port after 5 attempts")
+                err_msg = f"Could not connect after 5 attempts"
+                if last_error:
+                    err_msg += f": {last_error[:50]}"
+                raise RuntimeError(err_msg)
                 
             try:
                 # --- PHASE 2.5: METADATA ---
@@ -884,21 +1191,28 @@ class AutoProductionManager:
                         if task.step_audio == "pending":
                              task.step_audio = "skipped"
 
-                # Success!
+                # Success (pre-device creation)!
                 task.end_time = time.time()
                 duration = task.end_time - task.start_time
-                self.log_status(port, STATUS_COMPLETED, f"Done in {duration:.1f}s", progress=100)
                 
-                # Actions on completion
-                self._play_sound(success=True)
-                self._log_to_csv(task)
-                
-                with self.lock:
-                    self.stats["total_programmed"] += 1
-                    self.completion_times.append(duration)
-                    # Remove from pending if it was there (cleanup)
-                    if port in self.pending_resumes:
-                        del self.pending_resumes[port]
+                # If lot number is set, wait for serial number input before marking complete
+                if self.lot_number and self.lot_number_set and self.register_backend:
+                    task.step_device = "awaiting_serial"
+                    task.needs_user_action = True
+                    task.user_action_message = "Enter 4-digit serial number"
+                    self.log_status(port, STATUS_AWAITING_SERIAL, f"Ready for serial (MAC: {task.mac_address})", progress=100)
+                    # Don't play success sound yet - wait until device is fully created
+                else:
+                    # No device creation needed, mark as complete
+                    self.log_status(port, STATUS_COMPLETED, f"Done in {duration:.1f}s", progress=100)
+                    self._play_sound(success=True)
+                    self._log_to_csv(task)
+                    
+                    with self.lock:
+                        self.stats["total_programmed"] += 1
+                        self.completion_times.append(duration)
+                        if port in self.pending_resumes:
+                            del self.pending_resumes[port]
                 
             finally:
                 dev_prog.disconnect()
@@ -916,6 +1230,13 @@ class AutoProductionManager:
                 self.stats["total_failed"] += 1
                 if port in self.pending_resumes:
                     del self.pending_resumes[port]
+        
+        finally:
+            # Always release the port lock
+            try:
+                port_lock.release()
+            except:
+                pass
 
     def wait_for_auth(self):
         """Block until authentication is successful or skipped."""
@@ -988,6 +1309,10 @@ class AutoProductionManager:
                     for port in current_ports:
                         if port in self.pending_resumes:
                             # RESUMING A PAUSED DEVICE
+                            # Check if thread is still running (shouldn't be, but just in case)
+                            if self.is_port_busy(port):
+                                continue
+                                
                             print(f"{Colors.OKCYAN}[{port}] Device replugged - Resuming transfer...{Colors.ENDC}")
                             task = self.pending_resumes[port]
                             task.status = STATUS_CONNECTING
@@ -999,16 +1324,14 @@ class AutoProductionManager:
                             self.active_devices[port] = task
                             
                             # Restart processing thread with existing task
-                            t = threading.Thread(target=self.process_device, args=(port, task), daemon=True, name=f"thread-{port}")
-                            t.start()
+                            self.start_device_thread(port, task)
                             
                         elif port not in self.active_devices:
                             # TRULY NEW DEVICE
                             
-                            # Check if this port recently completed a task?
-                            # If so, ignore unless explicitly removed?
-                            # Actually, rely on 'active_devices' check above.
-                            # If it's not in active_devices, it's either brand new or was removed.
+                            # Check if this port has an active thread already
+                            if self.is_port_busy(port):
+                                continue
                             
                             # FIX: Double check if we already have an active task for this port (race condition)
                             if port in self.active_devices:
@@ -1020,8 +1343,7 @@ class AutoProductionManager:
                             print(f"{Colors.OKBLUE}[{port}] New device detected! (#{self.device_counter}, {usb_loc}){Colors.ENDC}")
                             task = DeviceTask(port, device_number=self.device_counter, usb_location=usb_loc)
                             self.active_devices[port] = task
-                            t = threading.Thread(target=self.process_device, args=(port, task), daemon=True, name=f"thread-{port}")
-                            t.start()
+                            self.start_device_thread(port, task)
                             
                     # 3. Update status of pending resumes (waiting for replug)
                     for port, task in self.pending_resumes.items():
@@ -1524,6 +1846,27 @@ HTML_TEMPLATE = """
             </button>
         </div>
     </div>
+    
+    <!-- Lot Number Modal (shown after login) -->
+    <div class="login-overlay" id="lot-number-overlay" style="display: none;">
+        <div class="login-card">
+            <div class="login-logo">📦</div>
+            <div class="login-title">Enter Lot Number</div>
+            <div class="login-subtitle">10-digit lot number for this production run<br>(e.g., 2025120001)</div>
+            
+            <div class="login-error" id="lot-error"></div>
+            
+            <form class="login-form" id="lot-form" onsubmit="handleLotNumber(event)">
+                <input type="text" class="login-input" id="lot-input" placeholder="0000000000" maxlength="10" pattern="[0-9]{10}" required style="font-family: 'JetBrains Mono', monospace; font-size: 24px; text-align: center; letter-spacing: 2px;">
+                <div style="color: var(--text-secondary); font-size: 12px;">Format: YYYYMMNNNN (Year, Month, Sequential)</div>
+                <button type="submit" class="login-btn" id="lot-btn">Start Production</button>
+            </form>
+            
+            <button class="login-btn skip-btn" onclick="skipLotNumber()">
+                Continue Without Device Creation
+            </button>
+        </div>
+    </div>
 
     <div class="container" id="main-container">
         <header>
@@ -1548,6 +1891,11 @@ HTML_TEMPLATE = """
         </header>
         
         <div class="session-bar" id="session-stats">
+            <div class="session-stat">
+                <span class="session-stat-icon">📦</span>
+                <span class="session-stat-value" id="lot-number-display">Not Set</span>
+                <span class="session-stat-label">Lot Number</span>
+            </div>
             <div class="session-stat">
                 <span class="session-stat-icon">⏱️</span>
                 <span class="session-stat-value" id="session-duration">0:00:00</span>
@@ -1637,8 +1985,8 @@ HTML_TEMPLATE = """
                 if (result.success) {
                     document.getElementById('login-overlay').style.display = 'none';
                     authChecked = true;
-                    // Reload page to refresh state
-                    location.reload();
+                    // Show lot number modal instead of reloading
+                    showLotNumberOverlay();
                 } else {
                     errorDiv.textContent = result.error || 'Login failed';
                     errorDiv.classList.add('show');
@@ -1676,6 +2024,96 @@ HTML_TEMPLATE = """
             overlay.style.display = 'flex';
         }
         
+        // Lot Number Handling
+        let lotNumberSet = false;
+        
+        function showLotNumberOverlay() {
+            document.getElementById('lot-number-overlay').style.display = 'flex';
+            document.getElementById('lot-input').focus();
+        }
+        
+        async function handleLotNumber(event) {
+            event.preventDefault();
+            
+            const lotNumber = document.getElementById('lot-input').value.trim();
+            const btn = document.getElementById('lot-btn');
+            const errorDiv = document.getElementById('lot-error');
+            
+            btn.disabled = true;
+            btn.textContent = 'Setting...';
+            errorDiv.classList.remove('show');
+            
+            try {
+                const response = await fetch('/api/lot_number', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({lot_number: lotNumber})
+                });
+                
+                const result = await response.json();
+                
+                if (result.success) {
+                    lotNumberSet = true;
+                    document.getElementById('lot-number-overlay').style.display = 'none';
+                    document.getElementById('lot-number-display').textContent = lotNumber;
+                } else {
+                    errorDiv.textContent = result.message || 'Invalid lot number';
+                    errorDiv.classList.add('show');
+                }
+            } catch (error) {
+                errorDiv.textContent = 'Connection error. Check your network.';
+                errorDiv.classList.add('show');
+            }
+            
+            btn.disabled = false;
+            btn.textContent = 'Start Production';
+        }
+        
+        function skipLotNumber() {
+            lotNumberSet = false;
+            document.getElementById('lot-number-overlay').style.display = 'none';
+        }
+        
+        async function submitSerialNumber(port) {
+            const input = document.getElementById(`serial-input-${port}`);
+            const serialNumber = input.value.trim();
+            const btn = document.getElementById(`serial-btn-${port}`);
+            const errorDiv = document.getElementById(`serial-error-${port}`);
+            
+            if (serialNumber.length !== 4 || !/^\\d{4}$/.test(serialNumber)) {
+                errorDiv.textContent = 'Enter exactly 4 digits';
+                errorDiv.style.display = 'block';
+                return;
+            }
+            
+            btn.disabled = true;
+            btn.textContent = 'Creating...';
+            errorDiv.style.display = 'none';
+            
+            try {
+                const response = await fetch('/api/serial_number', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({port: port, serial_number: serialNumber})
+                });
+                
+                const result = await response.json();
+                
+                if (!result.success) {
+                    errorDiv.textContent = result.message || 'Failed to create device';
+                    errorDiv.style.display = 'block';
+                    btn.disabled = false;
+                    btn.textContent = 'Create Device';
+                }
+                // If success, the device state will update and card will refresh
+            } catch (error) {
+                errorDiv.textContent = 'Connection error';
+                errorDiv.style.display = 'block';
+                btn.disabled = false;
+                btn.textContent = 'Create Device';
+            }
+        }
+        
         async function sendAction(port, action) {
             try {
                 await fetch('/api/action', {
@@ -1700,11 +2138,15 @@ HTML_TEMPLATE = """
             else if (status === 'registered_new') { label = 'Registered (New)'; className = 'registered'; }
             else if (status === 'registered_existing') { label = 'Registered (Existing)'; className = 'skipped'; }
             else if (status === 'registered') label = 'Registered';
+            else if (status === 'created') { label = 'Device Created'; className = 'registered'; }
+            else if (status === 'updated') { label = 'Device Updated'; className = 'skipped'; }
+            else if (status === 'awaiting_serial') { label = 'Enter Serial'; className = 'pending'; }
             else if (status === 'failed') label = 'Failed';
 
             if (type === 'firmware' && status === 'pending') label = 'Firmware';
             if (type === 'backend' && status === 'pending') label = 'Backend';
             if (type === 'audio' && status === 'pending') label = 'Audio';
+            if (type === 'device' && status === 'pending') label = 'Device';
 
             return `<div class="step-badge ${className}">${label}</div>`;
         }
@@ -1739,14 +2181,68 @@ HTML_TEMPLATE = """
             }
             
             // Step Badges
-            const steps = device.steps || { firmware: 'pending', backend: 'pending', audio: 'pending' };
+            const steps = device.steps || { firmware: 'pending', backend: 'pending', audio: 'pending', device: 'pending' };
             const stepBadges = `
                 <div class="status-steps">
                     ${getStepBadge('firmware', steps.firmware)}
                     ${getStepBadge('backend', steps.backend)}
                     ${getStepBadge('audio', steps.audio)}
+                    ${steps.device && steps.device !== 'pending' ? getStepBadge('device', steps.device) : ''}
                 </div>
             `;
+            
+            // Serial number input (shown when lot number is set and device creation is active)
+            let serialInput = '';
+            // Show input if lot number is set AND backend is enabled AND (awaiting serial OR processing)
+            // But disable button if not ready
+            const canSubmit = device.status === 'AWAITING_SERIAL';
+            const showInput = window.currentLotNumber && ${String(data.backend_enabled).toLowerCase()} && 
+                              (device.status === 'AWAITING_SERIAL' || !device.is_complete);
+            
+            if (showInput && !device.gs1_barcode) {
+                const btnDisabled = !canSubmit ? 'disabled' : '';
+                const btnText = canSubmit ? 'Create Device' : 'Processing...';
+                const boxStyle = canSubmit 
+                    ? 'background: rgba(155, 89, 247, 0.1); border: 1px solid var(--accent-purple);' 
+                    : 'background: var(--bg-secondary); border: 1px solid var(--border); opacity: 0.8;';
+                
+                serialInput = `
+                    <div class="serial-input-box" style="${boxStyle} border-radius: 8px; padding: 16px; margin: 12px 0;">
+                        <div style="font-weight: 600; color: ${canSubmit ? 'var(--accent-purple)' : 'var(--text-secondary)'}; margin-bottom: 8px;">
+                            ${canSubmit ? '📝 Enter Serial Number' : '⏳ Processing Device...'}
+                        </div>
+                        <div style="display: flex; gap: 8px; align-items: center;">
+                            <input type="text" id="serial-input-${device.port}" 
+                                   class="login-input" 
+                                   placeholder="0001" 
+                                   maxlength="4" 
+                                   pattern="[0-9]{4}"
+                                   style="flex: 1; font-family: 'JetBrains Mono', monospace; font-size: 20px; text-align: center; padding: 10px;"
+                                   onkeypress="if(event.key==='Enter' && !this.disabled)submitSerialNumber('${device.port}')"
+                                   ${btnDisabled ? '' : ''} 
+                            >
+                            <button id="serial-btn-${device.port}" class="btn" onclick="submitSerialNumber('${device.port}')" 
+                                    style="background: var(--accent-purple); padding: 10px 20px;" ${btnDisabled}>${btnText}</button>
+                        </div>
+                        <div id="serial-error-${device.port}" style="color: var(--accent-red); font-size: 12px; margin-top: 8px; display: none;"></div>
+                        <div style="color: var(--text-secondary); font-size: 11px; margin-top: 8px;">
+                            4-digit serial (e.g., 0001, 0002, ...) → GS1: <span style="font-family: monospace;">${window.currentLotNumber || '??????????'}${device.serial_number || 'XXXX'}</span>
+                        </div>
+                    </div>
+                `;
+            }
+            
+            // GS1 info (shown when device created)
+            let gs1Info = '';
+            if (device.gs1_barcode) {
+                gs1Info = `
+                    <div style="background: rgba(63, 185, 80, 0.1); border: 1px solid var(--accent-green); border-radius: 8px; padding: 12px; margin: 12px 0;">
+                        <div style="font-weight: 600; color: var(--accent-green); margin-bottom: 4px;">✅ Device Created</div>
+                        <div style="font-family: 'JetBrains Mono', monospace; font-size: 16px; color: var(--text-primary);">GS1: ${device.gs1_barcode}</div>
+                        ${device.device_id ? `<div style="font-size: 12px; color: var(--text-secondary);">Device ID: ${device.device_id}</div>` : ''}
+                    </div>
+                `;
+            }
 
             return `
                 <div class="device-card ${needsActionClass}">
@@ -1763,6 +2259,9 @@ HTML_TEMPLATE = """
                     ${actionBanner}
                     
                     ${stepBadges}
+                    
+                    ${serialInput}
+                    ${gs1Info}
 
                     <div class="device-message">${device.message}</div>
                     
@@ -1793,6 +2292,12 @@ HTML_TEMPLATE = """
                             <span class="meta-label">Battery</span>
                             <span class="meta-value">${device.battery_level !== null ? device.battery_level + '%' : '—'}</span>
                         </div>
+                        ${device.gs1_barcode ? `
+                        <div class="meta-item">
+                            <span class="meta-label">GS1</span>
+                            <span class="meta-value" style="font-size: 11px;">${device.gs1_barcode}</span>
+                        </div>
+                        ` : ''}
                     </div>
                     ${controls}
                 </div>
@@ -1855,10 +2360,16 @@ HTML_TEMPLATE = """
             }
         }
         
+        // Global variable to store current lot number
+        window.currentLotNumber = null;
+        
         async function updateDashboard() {
             try {
                 const response = await fetch('/api/state');
                 const data = await response.json();
+                
+                // Store lot number for serial input display
+                window.currentLotNumber = data.lot_number;
                 
                 // Check auth status on first load
                 if (!authChecked && !loginSkipped && data.auth) {
@@ -1866,6 +2377,10 @@ HTML_TEMPLATE = """
                         showLoginOverlay(data.auth);
                     } else if (data.auth.status === 'authenticated') {
                         authChecked = true;
+                        // Show lot number overlay if authenticated but lot number not set
+                        if (!data.lot_number_set && data.backend_enabled && !lotNumberSet) {
+                            showLotNumberOverlay();
+                        }
                     }
                 }
                 
@@ -1881,6 +2396,16 @@ HTML_TEMPLATE = """
                         authBadge.innerHTML = '⚠ Offline Mode';
                         authBadge.style.display = 'inline-flex';
                     }
+                }
+                
+                // Update lot number display
+                const lotDisplay = document.getElementById('lot-number-display');
+                if (data.lot_number) {
+                    lotDisplay.textContent = data.lot_number;
+                    lotDisplay.style.color = 'var(--accent-green)';
+                } else {
+                    lotDisplay.textContent = 'Not Set';
+                    lotDisplay.style.color = 'var(--text-secondary)';
                 }
                 
                 document.getElementById('firmware-version').textContent = data.firmware_version || '--';
@@ -2020,6 +2545,34 @@ def api_skip_auth():
         manager.auth_status = "offline"
         return jsonify({"success": True})
     return jsonify({"success": False})
+
+@app.route('/api/lot_number', methods=['POST'])
+def api_set_lot_number():
+    """Set the lot number for device creation."""
+    if not manager:
+        return jsonify({"success": False, "error": "Manager not initialized"}), 500
+    
+    data = request.get_json()
+    lot_number = data.get('lot_number', '').strip()
+    
+    success, message = manager.set_lot_number(lot_number)
+    return jsonify({"success": success, "message": message, "lot_number": lot_number if success else None})
+
+@app.route('/api/serial_number', methods=['POST'])
+def api_submit_serial():
+    """Submit serial number for a device awaiting it."""
+    if not manager:
+        return jsonify({"success": False, "error": "Manager not initialized"}), 500
+    
+    data = request.get_json()
+    port = data.get('port', '').strip()
+    serial_number = data.get('serial_number', '').strip()
+    
+    if not port:
+        return jsonify({"success": False, "error": "Port required"}), 400
+    
+    success, message = manager.submit_serial_number(port, serial_number)
+    return jsonify({"success": success, "message": message})
 
 def run_flask(port: int):
     import logging
