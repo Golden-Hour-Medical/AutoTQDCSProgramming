@@ -361,22 +361,30 @@ class AutoTQFirmwareProgrammer:
         self.log(f"Latest firmware found: {firmware_info['version']} ({firmware_info['binary_file'].name})", "SUCCESS")
         return firmware_info
     
-    def list_available_ports(self) -> List[Tuple[str, str]]:
-        """List available serial ports that might be ESP32-S3 devices"""
+    def list_available_ports(self, include_all: bool = False, quiet: bool = False) -> List[Tuple[str, str]]:
+        """List available serial ports that might be ESP32-S3 devices
+        
+        Args:
+            include_all: If True, include ALL COM ports even if they don't match ESP32 criteria
+            quiet: If True, suppress log messages (for repeated scanning)
+        """
         ports = []
         current_platform = platform.system().lower()
         
-        self.log("Scanning for available serial ports...")
+        if not quiet:
+            self.log("Scanning for available serial ports...")
         for port in serial.tools.list_ports.comports():
             # Look for ESP32-S3 specific identifiers
             is_esp32 = any(keyword in port.description.lower() for keyword in 
-                          ['esp32', 'esp32-s3', 'usb serial', 'cdc', 'uart', 'ch340', 'cp210', 'ft232', 'silicon labs'])
+                          ['esp32', 'esp32-s3', 'usb serial', 'cdc', 'uart', 'ch340', 'cp210', 'ft232', 'silicon labs', 'serial'])
             
             # Check for common ESP32-S3 USB vendor/product IDs
             esp32_s3_ids = [
                 (0x303A, 0x1001),  # Espressif ESP32-S3
+                (0x303A, 0x0002),  # Espressif ESP32-S3 CDC
                 (0x10C4, 0xEA60),  # Silicon Labs CP2102/CP2109
                 (0x1A86, 0x7523),  # QinHeng Electronics CH340
+                (0x1A86, 0x55D4),  # QinHeng Electronics CH9102
                 (0x0403, 0x6001),  # FTDI FT232R
                 (0x067B, 0x2303),  # Prolific PL2303
             ]
@@ -397,9 +405,11 @@ class AutoTQFirmwareProgrammer:
                 elif hasattr(port, 'location') and port.location:
                     device_description += f" (USB: {port.location})"
             
-            # Include device if it matches ESP32 criteria or has USB identifiers
-            if is_esp32 or vid_pid_match or (port.vid is not None and port.pid is not None):
-                vid_pid_str = f"VID:PID={port.vid:04X}:{port.pid:04X}" if port.vid else "Unknown"
+            # Include device if it matches ESP32 criteria or has USB identifiers OR include_all is set
+            should_include = is_esp32 or vid_pid_match or (port.vid is not None and port.pid is not None)
+            
+            if should_include or include_all:
+                vid_pid_str = f"VID:PID={port.vid:04X}:{port.pid:04X}" if port.vid else "Unknown VID/PID"
                 port_description = f"{device_description} [{port.device}] {vid_pid_str}"
                 
                 # Mark potential ESP32-S3 devices
@@ -411,9 +421,10 @@ class AutoTQFirmwareProgrammer:
                     port_description = f"❓ {port_description}"
                 
                 ports.append((port.device, port_description))
-                self.log(f"Found potential device: {port.device} - {device_description}")
+                if not quiet:
+                    self.log(f"Found potential device: {port.device} - {device_description}")
         
-        if not ports:
+        if not ports and not quiet:
             self.log("No potential ESP32-S3 devices found", "WARNING")
             if current_platform == "linux":
                 self.log("💡 On Linux, ensure user is in 'dialout' group: sudo usermod -a -G dialout $USER", "INFO")

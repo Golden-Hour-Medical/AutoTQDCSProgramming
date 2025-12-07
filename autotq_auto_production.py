@@ -173,18 +173,31 @@ class AutoProductionManager:
         if self.register_backend:
             try:
                 self.client = AutoTQClient()
+                
+                # Check if authentication is valid
                 if not self.client.is_authenticated():
-                    print(f"{Colors.WARNING}⚠️ Backend authentication required.{Colors.ENDC}")
-                
-                # Initialize setup tool for firmware downloads
-                self.setup_tool = AutoTQSetup(output_dir=str(Path.cwd()))
-                
-                # Attempt to download latest firmware from backend
-                self.download_latest_firmware_from_backend()
+                    print(f"{Colors.WARNING}⚠️ Backend authentication required or expired.{Colors.ENDC}")
+                    print(f"{Colors.OKCYAN}💡 To authenticate, run: python autotq_login.py{Colors.ENDC}")
+                    print(f"{Colors.WARNING}   Continuing without backend registration...{Colors.ENDC}")
+                    self.register_backend = False
+                    self.client = None
+                else:
+                    print(f"{Colors.OKGREEN}✅ Backend authenticated{Colors.ENDC}")
+                    # Initialize setup tool for firmware downloads
+                    self.setup_tool = AutoTQSetup(output_dir=str(Path.cwd()))
+                    
+                    # Attempt to download latest firmware from backend
+                    self.download_latest_firmware_from_backend()
                 
             except Exception as e:
-                print(f"{Colors.FAIL}❌ Backend/Setup init failed: {e}{Colors.ENDC}")
+                error_msg = str(e)
+                if 'connection' in error_msg.lower() or 'refused' in error_msg.lower():
+                    print(f"{Colors.WARNING}⚠️ Backend server unreachable (offline mode){Colors.ENDC}")
+                else:
+                    print(f"{Colors.WARNING}⚠️ Backend init failed: {e}{Colors.ENDC}")
+                print(f"{Colors.WARNING}   Continuing without backend registration...{Colors.ENDC}")
                 self.register_backend = False
+                self.client = None
 
         # Always try to refresh firmware cache on startup (after potential download)
         self.fw_programmer.find_latest_firmware()
@@ -782,10 +795,24 @@ class AutoProductionManager:
         print(f"\n{Colors.HEADER}{Colors.BOLD}AutoTQ Production Station{Colors.ENDC}")
         print(f"{Colors.OKBLUE}Dashboard: http://localhost:9090{Colors.ENDC}\n")
         
+        last_port_count = -1 # Track changes to reduce log spam
+        scan_count = 0
+        
         while self.running:
             try:
-                current_ports_info = self.fw_programmer.list_available_ports()
+                # Use include_all=True to be more permissive with device detection
+                # Use quiet=True to suppress repeated log messages
+                current_ports_info = self.fw_programmer.list_available_ports(include_all=True, quiet=True)
                 current_ports = {p[0] for p in current_ports_info}
+                
+                # Only log when port count changes (reduce noise)
+                scan_count += 1
+                if len(current_ports) != last_port_count:
+                    if current_ports:
+                        print(f"{Colors.OKGREEN}[Scan #{scan_count}] Found {len(current_ports)} device(s): {', '.join(current_ports)}{Colors.ENDC}")
+                    else:
+                        print(f"{Colors.WARNING}[Scan #{scan_count}] No devices detected. Waiting...{Colors.ENDC}")
+                    last_port_count = len(current_ports)
                 
                 with self.lock:
                     # 1. Handle removals
@@ -1637,13 +1664,19 @@ def main():
     flask_thread = threading.Thread(target=run_flask, args=(args.port,), daemon=True)
     flask_thread.start()
     
-    # Auto-open dashboard
+    # Auto-open dashboard in browser
     def open_browser():
-        time.sleep(1.5) # Wait for Flask to start
-        print(f"{Colors.OKGREEN}🌐 Opening dashboard at http://localhost:{args.port}{Colors.ENDC}")
-        webbrowser.open(f'http://localhost:{args.port}')
+        time.sleep(2.0) # Wait for Flask to fully start
+        url = f'http://localhost:{args.port}'
+        print(f"{Colors.OKGREEN}🌐 Opening dashboard: {url}{Colors.ENDC}")
+        try:
+            webbrowser.open(url)
+        except Exception as e:
+            print(f"{Colors.WARNING}⚠️ Could not open browser automatically: {e}{Colors.ENDC}")
+            print(f"{Colors.OKCYAN}   Please open manually: {url}{Colors.ENDC}")
     
-    threading.Thread(target=open_browser, daemon=True).start()
+    browser_thread = threading.Thread(target=open_browser, daemon=True)
+    browser_thread.start()
     
     try:
         manager.scan_loop()

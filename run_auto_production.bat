@@ -2,127 +2,119 @@
 setlocal ENABLEDELAYEDEXPANSION
 
 echo ===================================================
-echo ⚡ Starting AutoTQ Production Station
+echo Starting AutoTQ Production Station
 echo ===================================================
 
 REM ----------------------------------------------------
-REM 1. DETECT PYTHON (Robust Method)
+REM 1. DETECT PYTHON
 REM ----------------------------------------------------
 set "PYEXE="
+set "VENV_PYTHON=.venv\Scripts\python.exe"
 
-REM A) Check for Virtual Environment first (best practice)
-if exist ".venv\Scripts\python.exe" (
-    set "PYEXE=.venv\Scripts\python.exe"
-    echo [INFO] Using virtual environment: !PYEXE!
-    goto :FOUND
-)
-
-REM B) Check for 'py' launcher (standard Windows Python launcher)
-where py >nul 2>&1
-if %errorlevel% equ 0 (
-    REM Check if py can run -3
-    py -3 --version >nul 2>&1
+REM A) Check for Virtual Environment first
+if exist "%VENV_PYTHON%" (
+    "%VENV_PYTHON%" -m pip --version >nul 2>&1
     if !errorlevel! equ 0 (
-        set "PYEXE=py -3"
-        echo [INFO] Using Python Launcher 'py'
+        set "PYEXE=%VENV_PYTHON%"
+        echo [INFO] Using virtual environment
         goto :FOUND
-    )
-)
-
-REM C) Check standard installation paths (3.12 down to 3.8)
-for %%v in (312 311 310 39 38) do (
-    if exist "%LOCALAPPDATA%\Programs\Python\Python%%v\python.exe" (
-        set "PYEXE=%LOCALAPPDATA%\Programs\Python\Python%%v\python.exe"
-        echo [INFO] Found Python %%v in AppData
-        goto :FOUND
-    )
-    if exist "%ProgramFiles%\Python%%v\python.exe" (
-        set "PYEXE=%ProgramFiles%\Python%%v\python.exe"
-        echo [INFO] Found Python %%v in Program Files
-        goto :FOUND
-    )
-    if exist "C:\Python%%v\python.exe" (
-        set "PYEXE=C:\Python%%v\python.exe"
-        echo [INFO] Found Python %%v in C:\
-        goto :FOUND
-    )
-)
-
-REM D) Check PATH (but filter out Windows Store shim)
-for /f "usebackq delims=" %%P in (`where python 2^>nul`) do (
-    echo %%P | find /i "WindowsApps" >nul && (
-        REM Skip Windows Store shim which causes "Python not found" GUI popup
-    ) || (
-        if not defined PYEXE (
-            set "PYEXE=%%P"
-            echo [INFO] Found Python in PATH: %%P
-            goto :FOUND
-        )
-    )
-)
-
-REM ----------------------------------------------------
-REM 2. PYTHON NOT FOUND - ATTEMPT INSTALL OR EXIT
-REM ----------------------------------------------------
-if not defined PYEXE (
-    echo.
-    echo ❌ Python not found!
-    echo.
-    echo We can attempt to install Python 3.11 automatically via Winget.
-    echo Or you can install it manually from python.org.
-    echo.
-    choice /M "Attempt automatic installation?"
-    if !errorlevel! equ 1 (
-        echo.
-        echo 📦 Installing Python 3.11...
-        winget install -e --id Python.Python.3.11 --scope user --accept-package-agreements --accept-source-agreements
-        if !errorlevel! equ 0 (
-            echo ✅ Installation successful! Restarting script...
-            echo.
-            REM Try to find it again immediately
-            if exist "%LOCALAPPDATA%\Programs\Python\Python311\python.exe" set "PYEXE=%LOCALAPPDATA%\Programs\Python\Python311\python.exe"
-            if not defined PYEXE set "PYEXE=python"
-            goto :FOUND
-        ) else (
-            echo ❌ Installation failed. Please install Python manually.
-            pause
-            exit /b 1
-        )
     ) else (
-        echo Please install Python 3.8+ and try again.
+        echo [WARN] Virtual environment corrupted. Recreating...
+        rmdir /s /q .venv 2>nul
+    )
+)
+
+REM B) Find system Python
+set "SYS_PYTHON="
+
+where py >nul 2>&1
+if !errorlevel! equ 0 (
+    set "SYS_PYTHON=py"
+    echo [INFO] Found py launcher
+    goto :HAVE_SYSTEM_PYTHON
+)
+
+if exist "%LOCALAPPDATA%\Programs\Python\Python312\python.exe" (
+    set "SYS_PYTHON=%LOCALAPPDATA%\Programs\Python\Python312\python.exe"
+    goto :HAVE_SYSTEM_PYTHON
+)
+if exist "%LOCALAPPDATA%\Programs\Python\Python311\python.exe" (
+    set "SYS_PYTHON=%LOCALAPPDATA%\Programs\Python\Python311\python.exe"
+    goto :HAVE_SYSTEM_PYTHON
+)
+if exist "%LOCALAPPDATA%\Programs\Python\Python310\python.exe" (
+    set "SYS_PYTHON=%LOCALAPPDATA%\Programs\Python\Python310\python.exe"
+    goto :HAVE_SYSTEM_PYTHON
+)
+if exist "C:\Python311\python.exe" (
+    set "SYS_PYTHON=C:\Python311\python.exe"
+    goto :HAVE_SYSTEM_PYTHON
+)
+
+where python >nul 2>&1
+if !errorlevel! equ 0 (
+    set "SYS_PYTHON=python"
+    echo [INFO] Found python in PATH
+    goto :HAVE_SYSTEM_PYTHON
+)
+
+echo.
+echo ERROR: Python not found!
+echo Please install Python 3.8+ from python.org
+pause
+exit /b 1
+
+:HAVE_SYSTEM_PYTHON
+echo [INFO] Using: %SYS_PYTHON%
+
+REM ----------------------------------------------------
+REM 2. CREATE VENV IF NEEDED
+REM ----------------------------------------------------
+if not exist ".venv\Scripts\python.exe" (
+    echo.
+    echo Creating virtual environment...
+    %SYS_PYTHON% -m venv .venv
+    if !errorlevel! neq 0 (
+        echo ERROR: Failed to create virtual environment!
         pause
         exit /b 1
     )
+    echo Virtual environment created.
 )
+
+set "PYEXE=.venv\Scripts\python.exe"
+
+REM Ensure pip works
+"%PYEXE%" -m ensurepip --upgrade >nul 2>&1
+"%PYEXE%" -m pip install --upgrade pip >nul 2>&1
 
 :FOUND
 REM ----------------------------------------------------
 REM 3. INSTALL DEPENDENCIES
 REM ----------------------------------------------------
 echo.
-echo 📦 Checking dependencies...
+echo Checking dependencies...
 "%PYEXE%" -m pip install -r requirements.txt
 if %errorlevel% neq 0 (
     echo.
-    echo ❌ Failed to install dependencies!
-    echo Check your internet connection or try running as Administrator.
+    echo ERROR: Failed to install dependencies!
     pause
     exit /b 1
 )
 
-echo ✅ Dependencies verified.
+echo Dependencies OK.
 
 REM ----------------------------------------------------
 REM 4. RUN SCRIPT
 REM ----------------------------------------------------
 echo.
-echo 🚀 Launching Production Station...
+echo Launching Production Station...
 echo.
 
 "%PYEXE%" autotq_auto_production.py %*
 
 if %errorlevel% neq 0 (
     echo.
-    echo ⚠️ Script exited with error code %errorlevel%.
+    echo Script exited with error.
     pause
 )
