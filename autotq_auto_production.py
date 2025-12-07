@@ -274,7 +274,7 @@ class AutoProductionManager:
     def _init_backend(self):
         """Initialize backend connection and check authentication."""
         try:
-            self.client = AutoTQClient()
+            self.client = AutoTQClient(base_url=self.backend_url)
             
             # Check if authentication is valid
             if self.client.is_authenticated():
@@ -284,7 +284,7 @@ class AutoProductionManager:
                 print(f"{Colors.OKGREEN}✅ Backend authenticated as {self.auth_user}{Colors.ENDC}")
                 
                 # Initialize setup tool for firmware downloads
-                self.setup_tool = AutoTQSetup(output_dir=str(Path.cwd()))
+                self.setup_tool = AutoTQSetup(output_dir=str(Path.cwd()), base_url=self.backend_url)
                 
                 # Attempt to download latest firmware from backend
                 self.download_latest_firmware_from_backend()
@@ -367,7 +367,7 @@ class AutoProductionManager:
                 }, f, indent=2)
             
             # Step 4: Re-initialize the client with the new key
-            self.client = AutoTQClient()
+            self.client = AutoTQClient(base_url=self.backend_url)
             if self.client.is_authenticated():
                 user = self.client.get_user_profile()
                 self.auth_status = "authenticated"
@@ -376,7 +376,7 @@ class AutoProductionManager:
                 self.register_backend = True
                 
                 # Initialize setup tool
-                self.setup_tool = AutoTQSetup(output_dir=str(Path.cwd()))
+                self.setup_tool = AutoTQSetup(output_dir=str(Path.cwd()), base_url=self.backend_url)
                 
                 result["success"] = True
                 result["user"] = self.auth_user
