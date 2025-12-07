@@ -247,37 +247,44 @@ class AutoProductionManager:
     def _get_usb_location(self, port: str) -> str:
         """Try to extract USB hub/port location from port info."""
         try:
+            # Method 1: PySerial standard attributes (works best on Linux/Mac)
             for p in serial.tools.list_ports.comports():
                 if p.device == port:
-                    # 1. Try direct location attribute (common on Linux/macOS)
                     if p.location:
                         return f"USB:{p.location}"
                     
-                    # 2. Try parsing HWID for Windows LOCATION property
-                    # HWID example: USB\VID_10C4&PID_EA60\0001
-                    # But sometimes the location is buried in other properties not directly exposed by pyserial
-                    # standard objects.
-                    
-                    hwid = p.hwid
-                    
-                    # Check for "LOCATION=x-y.z" pattern common in some pyserial versions
-                    match = re.search(r'LOCATION=([0-9\-\.]+)', hwid)
-                    if match:
-                        return f"USB:{match.group(1)}"
-                        
-                    # 3. Windows Registry Fallback (if strictly needed and possible)
-                    # This is complex and slow, so we skip for now.
-                    
-                    # 4. Use USB Serial Number as fallback identifier if location fails
-                    # This at least gives a unique ID per cable if the cables have unique chips
+                    # Method 2: PowerShell WMI lookup (Windows specific robust method)
+                    if sys.platform == "win32":
+                        try:
+                            import subprocess
+                            # Use PowerShell to find the PNPDeviceID for this COM port
+                            # Win32_PnPEntity where Name contains 'COMx'
+                            cmd = f'Get-WmiObject Win32_PnPEntity | Where-Object {{ $_.Name -match "\\({port}\\)" }} | Select-Object -ExpandProperty PNPDeviceID'
+                            result = subprocess.run(["powershell", "-Command", cmd], capture_output=True, text=True, timeout=2)
+                            pnp_id = result.stdout.strip()
+                            
+                            if pnp_id:
+                                # Parse typical USB path from PNP ID
+                                # Example: USB\VID_10C4&PID_EA60\0001
+                                # Example Hub: USB\VID_xxxx...&LOCATION_1-4.2
+                                
+                                # Try to get parent (Hub) info if possible, or just use the unique instance ID
+                                # Extract the last part which is often the unique instance or location
+                                parts = pnp_id.split('\\')
+                                if len(parts) >= 3:
+                                    unique_id = parts[-1]
+                                    return f"USB ID:{unique_id}"
+                        except Exception:
+                            pass
+
+                    # Method 3: Fallback to serial number
                     if p.serial_number:
                         return f"SN:{p.serial_number}"
                         
-                    # 5. Fallback to description but strip generic parts
+                    # Method 4: Generic fallback
                     desc = p.description
                     if "USB Serial Device" in desc:
-                        return "USB Port" # Generic fallback
-                    
+                        return "USB Port"
                     return desc[:20]
         except Exception:
             pass
@@ -1758,6 +1765,14 @@ HTML_TEMPLATE = """
                     ${stepBadges}
 
                     <div class="device-message">${device.message}</div>
+                    
+                    ${device.status === 'FAILED' && device.errors.length > 0 ? `
+                        <div class="error-list" style="margin-bottom: 12px; padding: 8px; background: rgba(248, 81, 73, 0.1); border-radius: 6px; border: 1px solid rgba(248, 81, 73, 0.2);">
+                            <div style="font-size: 11px; font-weight: bold; color: var(--accent-red); margin-bottom: 4px;">ERRORS:</div>
+                            ${device.errors.map(e => `<div style="font-size: 11px; color: var(--text-secondary); font-family: monospace;">• ${e}</div>`).join('')}
+                        </div>
+                    ` : ''}
+
                     <div class="progress-container">
                         <div class="progress-bar" style="width: ${device.progress}%; background: ${progressColor}"></div>
                     </div>
