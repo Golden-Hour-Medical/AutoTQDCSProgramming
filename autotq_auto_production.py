@@ -19,6 +19,7 @@ import csv
 import glob
 import re
 import webbrowser
+import requests
 from datetime import datetime
 
 try:
@@ -153,6 +154,11 @@ class AutoProductionManager:
         self.running = True
         self.stats = {"total_programmed": 0, "total_failed": 0}
         
+        # Auth state
+        self.auth_status = "checking" # checking, authenticated, failed, offline
+        self.auth_error = None
+        self.auth_user = None
+        
         # Session tracking
         self.session_start_time = time.time()
         self.device_counter = 0 # Incremented for each new device
@@ -169,35 +175,10 @@ class AutoProductionManager:
         # Initialize Backend Client and Downloader
         self.client: Optional[AutoTQClient] = None
         self.setup_tool: Optional[AutoTQSetup] = None
+        self.backend_url = "https://api.theautotq.com"
         
         if self.register_backend:
-            try:
-                self.client = AutoTQClient()
-                
-                # Check if authentication is valid
-                if not self.client.is_authenticated():
-                    print(f"{Colors.WARNING}⚠️ Backend authentication required or expired.{Colors.ENDC}")
-                    print(f"{Colors.OKCYAN}💡 To authenticate, run: python autotq_login.py{Colors.ENDC}")
-                    print(f"{Colors.WARNING}   Continuing without backend registration...{Colors.ENDC}")
-                    self.register_backend = False
-                    self.client = None
-                else:
-                    print(f"{Colors.OKGREEN}✅ Backend authenticated{Colors.ENDC}")
-                    # Initialize setup tool for firmware downloads
-                    self.setup_tool = AutoTQSetup(output_dir=str(Path.cwd()))
-                    
-                    # Attempt to download latest firmware from backend
-                    self.download_latest_firmware_from_backend()
-                
-            except Exception as e:
-                error_msg = str(e)
-                if 'connection' in error_msg.lower() or 'refused' in error_msg.lower():
-                    print(f"{Colors.WARNING}⚠️ Backend server unreachable (offline mode){Colors.ENDC}")
-                else:
-                    print(f"{Colors.WARNING}⚠️ Backend init failed: {e}{Colors.ENDC}")
-                print(f"{Colors.WARNING}   Continuing without backend registration...{Colors.ENDC}")
-                self.register_backend = False
-                self.client = None
+            self._init_backend()
 
         # Always try to refresh firmware cache on startup (after potential download)
         self.fw_programmer.find_latest_firmware()
@@ -290,6 +271,127 @@ class AutoProductionManager:
             pass
         return "Unknown"
 
+    def _init_backend(self):
+        """Initialize backend connection and check authentication."""
+        try:
+            self.client = AutoTQClient()
+            
+            # Check if authentication is valid
+            if self.client.is_authenticated():
+                user = self.client.get_user_profile()
+                self.auth_status = "authenticated"
+                self.auth_user = user.get('username') if user else None
+                print(f"{Colors.OKGREEN}✅ Backend authenticated as {self.auth_user}{Colors.ENDC}")
+                
+                # Initialize setup tool for firmware downloads
+                self.setup_tool = AutoTQSetup(output_dir=str(Path.cwd()))
+                
+                # Attempt to download latest firmware from backend
+                self.download_latest_firmware_from_backend()
+            else:
+                self.auth_status = "failed"
+                self.auth_error = "API key invalid or expired"
+                print(f"{Colors.WARNING}⚠️ Backend authentication required.{Colors.ENDC}")
+                print(f"{Colors.OKCYAN}💡 Login via the web dashboard at http://localhost:9090{Colors.ENDC}")
+            
+        except Exception as e:
+            error_msg = str(e)
+            if 'connection' in error_msg.lower() or 'refused' in error_msg.lower():
+                self.auth_status = "offline"
+                self.auth_error = "Server unreachable"
+                print(f"{Colors.WARNING}⚠️ Backend server unreachable (offline mode){Colors.ENDC}")
+            else:
+                self.auth_status = "failed"
+                self.auth_error = str(e)
+                print(f"{Colors.WARNING}⚠️ Backend init failed: {e}{Colors.ENDC}")
+
+    def authenticate(self, username: str, password: str) -> dict:
+        """Authenticate with username/password, get API key, and save it."""
+        import requests
+        
+        result = {"success": False, "error": None, "user": None}
+        
+        try:
+            # Step 1: Login with username/password to get access token
+            session = requests.Session()
+            session.verify = True
+            
+            response = session.post(
+                f"{self.backend_url}/auth/token",
+                data={"username": username, "password": password},
+                timeout=30
+            )
+            
+            if response.status_code == 401:
+                result["error"] = "Invalid username or password"
+                return result
+            elif response.status_code == 403:
+                result["error"] = response.json().get('detail', 'Account locked or forbidden')
+                return result
+            elif response.status_code != 200:
+                result["error"] = f"Login failed: {response.status_code}"
+                return result
+            
+            token_data = response.json()
+            access_token = token_data.get("access_token")
+            if not access_token:
+                result["error"] = "No access token received"
+                return result
+            
+            # Step 2: Create API key using the access token
+            session.headers['Authorization'] = f"Bearer {access_token}"
+            
+            key_name = f"AutoTQ-Production-{datetime.now().strftime('%Y%m%d-%H%M%S')}"
+            key_response = session.post(
+                f"{self.backend_url}/users/me/api-keys",
+                json={"name": key_name},
+                timeout=30
+            )
+            
+            if key_response.status_code not in (200, 201):
+                result["error"] = f"Failed to create API key: {key_response.status_code}"
+                return result
+            
+            key_data = key_response.json()
+            api_key = key_data.get("key") or key_data.get("api_key")
+            if not api_key:
+                result["error"] = "No API key in response"
+                return result
+            
+            # Step 3: Save the API key
+            token_file = Path("autotq_token.json")
+            with open(token_file, 'w') as f:
+                json.dump({
+                    "api_key": api_key,
+                    "saved_at": datetime.now().isoformat() + "Z"
+                }, f, indent=2)
+            
+            # Step 4: Re-initialize the client with the new key
+            self.client = AutoTQClient()
+            if self.client.is_authenticated():
+                user = self.client.get_user_profile()
+                self.auth_status = "authenticated"
+                self.auth_user = user.get('username') if user else username
+                self.auth_error = None
+                self.register_backend = True
+                
+                # Initialize setup tool
+                self.setup_tool = AutoTQSetup(output_dir=str(Path.cwd()))
+                
+                result["success"] = True
+                result["user"] = self.auth_user
+                print(f"{Colors.OKGREEN}✅ Authenticated as {self.auth_user}{Colors.ENDC}")
+            else:
+                result["error"] = "API key validation failed"
+            
+        except requests.exceptions.ConnectionError:
+            result["error"] = "Cannot connect to server"
+            self.auth_status = "offline"
+        except Exception as e:
+            result["error"] = str(e)
+        
+        return result
+
     def download_latest_firmware_from_backend(self):
         """Downloads the latest firmware from the backend API if available."""
         if not self.setup_tool or not self.client.is_authenticated():
@@ -335,6 +437,11 @@ class AutoProductionManager:
             "flash_enabled": self.flash_firmware_flag,
             "backend_enabled": self.register_backend,
             "production_mode": self.production_mode,
+            "auth": {
+                "status": self.auth_status,
+                "user": self.auth_user,
+                "error": self.auth_error,
+            },
             "session": {
                 "duration_seconds": round(session_duration, 0),
                 "total_devices": self.device_counter,
@@ -1257,13 +1364,133 @@ HTML_TEMPLATE = """
         .toggle-logs-btn:hover {
             background: var(--border);
         }
+        
+        /* Login Modal */
+        .login-overlay {
+            position: fixed;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            background: var(--bg-primary);
+            z-index: 1000;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+        .login-card {
+            background: var(--bg-card);
+            border: 1px solid var(--border);
+            border-radius: 16px;
+            padding: 40px;
+            width: 100%;
+            max-width: 400px;
+            text-align: center;
+        }
+        .login-logo { font-size: 48px; margin-bottom: 16px; }
+        .login-title { font-size: 24px; font-weight: 700; margin-bottom: 8px; }
+        .login-subtitle { color: var(--text-secondary); margin-bottom: 32px; }
+        .login-form { display: flex; flex-direction: column; gap: 16px; }
+        .login-input {
+            background: var(--bg-primary);
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            padding: 12px 16px;
+            font-size: 14px;
+            color: var(--text-primary);
+            outline: none;
+            transition: border-color 0.2s;
+        }
+        .login-input:focus {
+            border-color: var(--accent-blue);
+        }
+        .login-input::placeholder { color: var(--text-secondary); }
+        .login-btn {
+            background: var(--accent-blue);
+            border: none;
+            border-radius: 8px;
+            padding: 14px;
+            font-size: 14px;
+            font-weight: 600;
+            color: white;
+            cursor: pointer;
+            transition: background 0.2s;
+        }
+        .login-btn:hover { background: #4a9be8; }
+        .login-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+        .login-error {
+            background: rgba(248, 81, 73, 0.1);
+            border: 1px solid var(--accent-red);
+            border-radius: 8px;
+            padding: 12px;
+            color: var(--accent-red);
+            font-size: 13px;
+            display: none;
+        }
+        .login-error.show { display: block; }
+        .login-offline {
+            background: rgba(210, 153, 34, 0.1);
+            border: 1px solid var(--accent-orange);
+            color: var(--accent-orange);
+        }
+        .skip-btn {
+            background: transparent;
+            border: 1px solid var(--border);
+            color: var(--text-secondary);
+            margin-top: 16px;
+        }
+        .skip-btn:hover { 
+            background: var(--bg-secondary);
+            color: var(--text-primary);
+        }
+        .auth-badge {
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+            padding: 4px 10px;
+            border-radius: 12px;
+            font-size: 11px;
+            font-weight: 600;
+        }
+        .auth-badge.authenticated { 
+            background: rgba(63, 185, 80, 0.1); 
+            color: var(--accent-green);
+        }
+        .auth-badge.offline { 
+            background: rgba(210, 153, 34, 0.1); 
+            color: var(--accent-orange);
+        }
 
     </style>
 </head>
 <body>
-    <div class="container">
+    <!-- Login Overlay (shown when auth fails) -->
+    <div class="login-overlay" id="login-overlay" style="display: none;">
+        <div class="login-card">
+            <div class="login-logo">🔐</div>
+            <div class="login-title">AutoTQ Production</div>
+            <div class="login-subtitle">Sign in to enable backend registration</div>
+            
+            <div class="login-error" id="login-error"></div>
+            
+            <form class="login-form" id="login-form" onsubmit="handleLogin(event)">
+                <input type="text" class="login-input" id="login-username" placeholder="Username" required>
+                <input type="password" class="login-input" id="login-password" placeholder="Password" required>
+                <button type="submit" class="login-btn" id="login-btn">Sign In</button>
+            </form>
+            
+            <button class="login-btn skip-btn" onclick="skipLogin()">
+                Continue Without Backend
+            </button>
+        </div>
+    </div>
+
+    <div class="container" id="main-container">
         <header>
-            <h1>⚡ AutoTQ Production Station</h1>
+            <div>
+                <h1>⚡ AutoTQ Production Station</h1>
+                <span class="auth-badge" id="auth-badge" style="display: none;"></span>
+            </div>
             <div class="stats">
                 <div class="stat firmware">
                     <div class="stat-value" id="firmware-version">--</div>
@@ -1344,6 +1571,67 @@ HTML_TEMPLATE = """
     </div>
     
     <script>
+        let authChecked = false;
+        let loginSkipped = false;
+        
+        async function handleLogin(event) {
+            event.preventDefault();
+            const username = document.getElementById('login-username').value;
+            const password = document.getElementById('login-password').value;
+            const btn = document.getElementById('login-btn');
+            const errorDiv = document.getElementById('login-error');
+            
+            btn.disabled = true;
+            btn.textContent = 'Signing in...';
+            errorDiv.classList.remove('show');
+            
+            try {
+                const response = await fetch('/api/login', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({username, password})
+                });
+                
+                const result = await response.json();
+                
+                if (result.success) {
+                    document.getElementById('login-overlay').style.display = 'none';
+                    authChecked = true;
+                } else {
+                    errorDiv.textContent = result.error || 'Login failed';
+                    errorDiv.classList.add('show');
+                }
+            } catch (error) {
+                errorDiv.textContent = 'Connection error. Check your network.';
+                errorDiv.classList.add('show');
+            }
+            
+            btn.disabled = false;
+            btn.textContent = 'Sign In';
+        }
+        
+        function skipLogin() {
+            loginSkipped = true;
+            document.getElementById('login-overlay').style.display = 'none';
+        }
+        
+        function showLoginOverlay(authData) {
+            if (loginSkipped) return;
+            
+            const overlay = document.getElementById('login-overlay');
+            const errorDiv = document.getElementById('login-error');
+            
+            if (authData.status === 'offline') {
+                errorDiv.textContent = '⚠️ Backend server unreachable. Working in offline mode.';
+                errorDiv.classList.add('show', 'login-offline');
+            } else if (authData.status === 'failed') {
+                errorDiv.textContent = authData.error || 'Authentication required';
+                errorDiv.classList.add('show');
+            }
+            
+            overlay.style.display = 'flex';
+        }
+        
         async function sendAction(port, action) {
             try {
                 await fetch('/api/action', {
@@ -1520,6 +1808,29 @@ HTML_TEMPLATE = """
                 const response = await fetch('/api/state');
                 const data = await response.json();
                 
+                // Check auth status on first load
+                if (!authChecked && !loginSkipped && data.auth) {
+                    if (data.auth.status === 'failed' || data.auth.status === 'offline') {
+                        showLoginOverlay(data.auth);
+                    } else if (data.auth.status === 'authenticated') {
+                        authChecked = true;
+                    }
+                }
+                
+                // Update auth badge
+                const authBadge = document.getElementById('auth-badge');
+                if (data.auth) {
+                    if (data.auth.status === 'authenticated') {
+                        authBadge.className = 'auth-badge authenticated';
+                        authBadge.innerHTML = `✓ ${data.auth.user || 'Connected'}`;
+                        authBadge.style.display = 'inline-flex';
+                    } else if (data.auth.status === 'offline' || loginSkipped) {
+                        authBadge.className = 'auth-badge offline';
+                        authBadge.innerHTML = '⚠ Offline Mode';
+                        authBadge.style.display = 'inline-flex';
+                    }
+                }
+                
                 document.getElementById('firmware-version').textContent = data.firmware_version || '--';
                 document.getElementById('total-success').textContent = data.stats.total_programmed;
                 document.getElementById('total-failed').textContent = data.stats.total_failed;
@@ -1632,6 +1943,22 @@ def api_get_log(filename):
         })
     except Exception as e:
         return jsonify({"error": str(e)}), 500
+
+@app.route('/api/login', methods=['POST'])
+def api_login():
+    """Authenticate with username/password and get API key."""
+    if not manager:
+        return jsonify({"success": False, "error": "Manager not initialized"}), 500
+    
+    data = request.get_json()
+    username = data.get('username', '').strip()
+    password = data.get('password', '')
+    
+    if not username or not password:
+        return jsonify({"success": False, "error": "Username and password required"}), 400
+    
+    result = manager.authenticate(username, password)
+    return jsonify(result)
 
 def run_flask(port: int):
     import logging
