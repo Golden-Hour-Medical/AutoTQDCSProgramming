@@ -249,24 +249,36 @@ class AutoProductionManager:
         try:
             for p in serial.tools.list_ports.comports():
                 if p.device == port:
-                    # Try to get location from various attributes
-                    loc = getattr(p, 'location', None)
-                    if loc:
-                        return f"USB:{loc}"
+                    # 1. Try direct location attribute (common on Linux/macOS)
+                    if p.location:
+                        return f"USB:{p.location}"
                     
-                    # Try hwid which often contains bus-port info
-                    hwid = getattr(p, 'hwid', '') or ''
-                    # Look for patterns like "USB VID:PID=xxxx:xxxx LOCATION=1-2.3"
-                    match = re.search(r'LOCATION=([^\s]+)', hwid)
+                    # 2. Try parsing HWID for Windows LOCATION property
+                    # HWID example: USB\VID_10C4&PID_EA60\0001
+                    # But sometimes the location is buried in other properties not directly exposed by pyserial
+                    # standard objects.
+                    
+                    hwid = p.hwid
+                    
+                    # Check for "LOCATION=x-y.z" pattern common in some pyserial versions
+                    match = re.search(r'LOCATION=([0-9\-\.]+)', hwid)
                     if match:
                         return f"USB:{match.group(1)}"
+                        
+                    # 3. Windows Registry Fallback (if strictly needed and possible)
+                    # This is complex and slow, so we skip for now.
                     
-                    # Try to extract from description
-                    desc = getattr(p, 'description', '') or ''
-                    if 'USB' in desc:
-                        return desc[:30] # Truncate if too long
+                    # 4. Use USB Serial Number as fallback identifier if location fails
+                    # This at least gives a unique ID per cable if the cables have unique chips
+                    if p.serial_number:
+                        return f"SN:{p.serial_number}"
+                        
+                    # 5. Fallback to description but strip generic parts
+                    desc = p.description
+                    if "USB Serial Device" in desc:
+                        return "USB Port" # Generic fallback
                     
-                    return "USB"
+                    return desc[:20]
         except Exception:
             pass
         return "Unknown"
