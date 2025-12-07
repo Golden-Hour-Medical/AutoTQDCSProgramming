@@ -18,6 +18,7 @@ import serial.tools.list_ports
 import csv
 import glob
 import re
+import webbrowser
 from datetime import datetime
 
 try:
@@ -1635,6 +1636,14 @@ def main():
     # Start Flask in background
     flask_thread = threading.Thread(target=run_flask, args=(args.port,), daemon=True)
     flask_thread.start()
+    
+    # Auto-open dashboard
+    def open_browser():
+        time.sleep(1.5) # Wait for Flask to start
+        print(f"{Colors.OKGREEN}🌐 Opening dashboard at http://localhost:{args.port}{Colors.ENDC}")
+        webbrowser.open(f'http://localhost:{args.port}')
+    
+    threading.Thread(target=open_browser, daemon=True).start()
     
     try:
         manager.scan_loop()
