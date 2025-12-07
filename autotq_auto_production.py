@@ -898,9 +898,30 @@ class AutoProductionManager:
                 if port in self.pending_resumes:
                     del self.pending_resumes[port]
 
+    def wait_for_auth(self):
+        """Block until authentication is successful or skipped."""
+        if self.auth_status == "authenticated":
+            return
+            
+        print(f"{Colors.WARNING}Waiting for authentication...{Colors.ENDC}")
+        
+        while self.running:
+            # Check if auth status changed (via API)
+            if self.auth_status == "authenticated":
+                return
+            
+            # Check if we should skip backend
+            if not self.register_backend:
+                return
+                
+            time.sleep(0.5)
+
     def scan_loop(self):
         print(f"\n{Colors.HEADER}{Colors.BOLD}AutoTQ Production Station{Colors.ENDC}")
         print(f"{Colors.OKBLUE}Dashboard: http://localhost:9090{Colors.ENDC}\n")
+        
+        # BLOCK HERE UNTIL AUTHENTICATED
+        self.wait_for_auth()
         
         last_port_count = -1 # Track changes to reduce log spam
         scan_count = 0
@@ -1597,6 +1618,8 @@ HTML_TEMPLATE = """
                 if (result.success) {
                     document.getElementById('login-overlay').style.display = 'none';
                     authChecked = true;
+                    // Reload page to refresh state
+                    location.reload();
                 } else {
                     errorDiv.textContent = result.error || 'Login failed';
                     errorDiv.classList.add('show');
@@ -1613,6 +1636,8 @@ HTML_TEMPLATE = """
         function skipLogin() {
             loginSkipped = true;
             document.getElementById('login-overlay').style.display = 'none';
+            // Send skip request to backend to unblock loop
+            fetch('/api/skip_auth', { method: 'POST' });
         }
         
         function showLoginOverlay(authData) {
@@ -1959,6 +1984,15 @@ def api_login():
     
     result = manager.authenticate(username, password)
     return jsonify(result)
+
+@app.route('/api/skip_auth', methods=['POST'])
+def api_skip_auth():
+    """Skip authentication and run in offline mode."""
+    if manager:
+        manager.register_backend = False
+        manager.auth_status = "offline"
+        return jsonify({"success": True})
+    return jsonify({"success": False})
 
 def run_flask(port: int):
     import logging
