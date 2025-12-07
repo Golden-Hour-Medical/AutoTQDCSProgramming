@@ -627,9 +627,11 @@ def ensure_pcb_stage(client: AutoTQClient, mac: str, fw: Optional[str], hw: Opti
     """
     try:
         body: Dict[str, Any] = {
-            "name": "AutoTQ PCB",
             "current_stage_label": stage_label,
         }
+        if allow_create:
+            body["name"] = "AutoTQ PCB"
+            
         if hw:
             body["hardware_version"] = hw
         if fw:
@@ -639,8 +641,15 @@ def ensure_pcb_stage(client: AutoTQClient, mac: str, fw: Optional[str], hw: Opti
         r = client.session.put(f"{client.base_url}/pcbs/by-mac/{mac}", json=body, timeout=15)
         if r.status_code in (200, 201):
             data = r.json()
+            is_new = r.status_code == 201 or data.get('created', False) # 201 Created or specific flag if API returns it
+            # The API might just return the object. Let's assume 201 is new, 200 is updated if the API follows conventions.
+            # If the API returns 200 for both, we can't distinguish easily without checking 'created_at' vs now.
+            # Let's attach a temporary flag to the returned dict for the caller
+            data['_is_new'] = (r.status_code == 201)
+            
             print(f"[PCB] upserted id={data.get('id')} stage={data.get('current_stage_label')}")
             return data
+            
         if r.status_code == 403:
             try:
                 detail = r.json().get('detail')
@@ -648,25 +657,35 @@ def ensure_pcb_stage(client: AutoTQClient, mac: str, fw: Optional[str], hw: Opti
                 detail = r.text
             print(f"[PCB-ERR] 403 Forbidden on upsert-by-mac: {detail}")
             return None
+        
+        # If 404 and not allow_create, just return None
+        if r.status_code == 404 and not allow_create:
+             return None
 
         # Fallback: search -> create/update using standard endpoints
+        # This is mainly legacy fallback, the upsert should work
         resp = api_get(client, "/pcbs", params={"q": mac, "limit": 5}, timeout=10)
         match = None
         if resp.status_code == 200:
             items = resp.json().get('items', [])
             match = next((it for it in items if (it.get('mac_address') or '').lower() == mac.lower()), None)
+        
         if match is None and allow_create:
             create_body = {"mac_address": mac, **body}
+            # Ensure name is set for creation
+            if "name" not in create_body:
+                 create_body["name"] = "AutoTQ PCB"
+                 
             rc = api_post(client, "/pcbs", json=create_body, timeout=15)
             if rc.status_code in (200, 201):
                 return rc.json()
-            if rc.status_code == 403:
-                try:
-                    detail = rc.json().get('detail')
-                except Exception:
-                    detail = rc.text
-                print(f"[PCB-ERR] 403 Forbidden on create: {detail}")
-                return None
+            if rc.status_code == 409: # Conflict - already exists (race condition)
+                 # Try to find it again
+                 resp = api_get(client, "/pcbs", params={"q": mac, "limit": 5}, timeout=10)
+                 if resp.status_code == 200:
+                    items = resp.json().get('items', [])
+                    match = next((it for it in items if (it.get('mac_address') or '').lower() == mac.lower()), None)
+
         if match is not None:
             pcb_id = match.get('id')
             ru = api_put(client, f"/pcbs/{pcb_id}", json=body, timeout=15)
@@ -674,14 +693,8 @@ def ensure_pcb_stage(client: AutoTQClient, mac: str, fw: Optional[str], hw: Opti
                 g = api_get(client, f"/pcbs/{pcb_id}", timeout=10)
                 if g.status_code == 200:
                     return g.json()
-            if ru.status_code == 403:
-                try:
-                    detail = ru.json().get('detail')
-                except Exception:
-                    detail = ru.text
-                print(f"[PCB-ERR] 403 Forbidden on update: {detail}")
-                return match
             return match
+            
         return None
     except Exception as e:
         print(f"[PCB-ERR] {e}")

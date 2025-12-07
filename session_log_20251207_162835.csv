@@ -1,0 +1,5 @@
+Timestamp,Port,MAC Address,PCB ID,Firmware,Status,Step:Firmware,Step:Backend,Step:Audio,Duration (s),Error
+2025-12-07 16:28:56,COM5,D0:CF:13:08:76:88,499,1.7.22,COMPLETED,skipped,registered_existing,skipped,14.9,
+2025-12-07 16:29:44,COM8,28:37:2F:8D:65:00,495,1.7.22,COMPLETED,flashed,registered_existing,skipped,41.5,
+2025-12-07 16:30:35,COM7,28:37:2F:8D:63:98,514,1.7.22,COMPLETED,flashed,registered_existing,transferred,61.7,
+2025-12-07 16:31:01,COM5,D0:CF:13:08:76:88,499,1.7.22,COMPLETED,skipped,registered_existing,skipped,14.4,
