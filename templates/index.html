@@ -1,0 +1,1132 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AutoTQ Production Station</title>
+    <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600&family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <style>
+        :root {
+            --bg-primary: #0d1117;
+            --bg-secondary: #161b22;
+            --bg-card: #21262d;
+            --border: #30363d;
+            --text-primary: #f0f6fc;
+            --text-secondary: #8b949e;
+            --accent-blue: #58a6ff;
+            --accent-green: #3fb950;
+            --accent-orange: #d29922;
+            --accent-red: #f85149;
+            --accent-purple: #a371f7;
+            --badge-gray: #30363d;
+        }
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            font-family: 'Inter', -apple-system, sans-serif;
+            background: var(--bg-primary);
+            color: var(--text-primary);
+            min-height: 100vh;
+            padding: 24px;
+        }
+        .container { max-width: 1400px; margin: 0 auto; }
+        header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 32px;
+            padding-bottom: 24px;
+            border-bottom: 1px solid var(--border);
+        }
+        h1 {
+            font-size: 28px;
+            font-weight: 700;
+            background: linear-gradient(135deg, var(--accent-blue), var(--accent-purple));
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+        }
+        .stats {
+            display: flex;
+            gap: 24px;
+        }
+        .stat {
+            text-align: center;
+            padding: 12px 20px;
+            background: var(--bg-secondary);
+            border-radius: 12px;
+            border: 1px solid var(--border);
+        }
+        .stat-value {
+            font-size: 28px;
+            font-weight: 700;
+            font-family: 'JetBrains Mono', monospace;
+        }
+        .stat-label { font-size: 12px; color: var(--text-secondary); text-transform: uppercase; letter-spacing: 0.5px; }
+        .stat.success .stat-value { color: var(--accent-green); }
+        .stat.failed .stat-value { color: var(--accent-red); }
+        .stat.firmware .stat-value { color: var(--accent-purple); font-size: 18px; }
+        
+        .section-title {
+            font-size: 14px;
+            font-weight: 600;
+            color: var(--text-secondary);
+            text-transform: uppercase;
+            letter-spacing: 1px;
+            margin-bottom: 16px;
+        }
+        .devices-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(380px, 1fr));
+            gap: 16px;
+            margin-bottom: 40px;
+        }
+        .device-card {
+            background: var(--bg-card);
+            border: 1px solid var(--border);
+            border-radius: 16px;
+            padding: 20px;
+            transition: all 0.2s ease;
+            position: relative;
+        }
+        .device-card:hover {
+            border-color: var(--accent-blue);
+            transform: translateY(-2px);
+        }
+        .device-card.needs-action {
+            border-color: var(--accent-red);
+            animation: pulse-border 2s infinite;
+        }
+        @keyframes pulse-border {
+            0%, 100% { box-shadow: 0 0 0 0 rgba(248, 81, 73, 0.4); }
+            50% { box-shadow: 0 0 0 8px rgba(248, 81, 73, 0); }
+        }
+        .device-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 16px;
+        }
+        .device-port {
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 18px;
+            font-weight: 600;
+        }
+        .device-status {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            padding: 6px 12px;
+            border-radius: 20px;
+            font-size: 12px;
+            font-weight: 600;
+        }
+        .device-message {
+            font-size: 14px;
+            color: var(--text-secondary);
+            margin-bottom: 16px;
+            min-height: 20px;
+        }
+        .progress-container {
+            background: var(--bg-primary);
+            border-radius: 8px;
+            height: 8px;
+            overflow: hidden;
+            margin-bottom: 16px;
+        }
+        .progress-bar {
+            height: 100%;
+            border-radius: 8px;
+            transition: width 0.3s ease;
+        }
+        .device-meta {
+            display: grid;
+            grid-template-columns: repeat(2, 1fr);
+            gap: 12px;
+            font-size: 13px;
+        }
+        .meta-item {
+            display: flex;
+            flex-direction: column;
+            gap: 2px;
+        }
+        .meta-label { color: var(--text-secondary); font-size: 11px; text-transform: uppercase; }
+        .meta-value { font-family: 'JetBrains Mono', monospace; font-weight: 500; }
+        
+        .action-banner {
+            background: linear-gradient(135deg, #f8514922, #f8514911);
+            border: 1px solid var(--accent-red);
+            border-radius: 12px;
+            padding: 16px;
+            margin-bottom: 16px;
+            text-align: center;
+        }
+        .action-banner-icon {
+            font-size: 32px;
+            margin-bottom: 8px;
+        }
+        .action-banner-title {
+            font-weight: 600;
+            color: var(--accent-red);
+            margin-bottom: 4px;
+        }
+        .action-banner-desc {
+            font-size: 13px;
+            color: var(--text-secondary);
+            margin-bottom: 12px;
+        }
+        
+        .control-buttons {
+            display: flex;
+            gap: 8px;
+            margin-top: 16px;
+            padding-top: 16px;
+            border-top: 1px solid var(--border);
+        }
+        
+        .btn {
+            background: var(--bg-secondary);
+            border: 1px solid var(--border);
+            color: var(--text-primary);
+            padding: 8px 12px;
+            border-radius: 6px;
+            font-size: 12px;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.2s;
+            flex: 1;
+        }
+        .btn:hover {
+            background: var(--border);
+        }
+        
+        .btn-primary {
+            background: var(--accent-blue);
+            border-color: var(--accent-blue);
+        }
+        .btn-primary:hover {
+            background: #4a9be8;
+        }
+        
+        .empty-state {
+            text-align: center;
+            padding: 60px 20px;
+            background: var(--bg-secondary);
+            border-radius: 16px;
+            border: 2px dashed var(--border);
+        }
+        .empty-state-icon { font-size: 48px; margin-bottom: 16px; }
+        .empty-state-title { font-size: 20px; font-weight: 600; margin-bottom: 8px; }
+        .empty-state-desc { color: var(--text-secondary); }
+        
+        .pulse { animation: pulse 2s infinite; }
+        @keyframes pulse {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.5; }
+        }
+
+        /* Status Badges Row */
+        .status-steps {
+            display: flex;
+            gap: 8px;
+            margin-top: 12px;
+            margin-bottom: 12px;
+        }
+        .step-badge {
+            flex: 1;
+            font-size: 11px;
+            text-transform: uppercase;
+            padding: 4px 8px;
+            border-radius: 6px;
+            text-align: center;
+            font-weight: 600;
+            background: var(--badge-gray);
+            color: var(--text-secondary);
+            border: 1px solid transparent;
+        }
+        .step-badge.pending { opacity: 0.5; }
+        .step-badge.skipped { background: rgba(52, 152, 219, 0.1); color: #3498db; border-color: rgba(52, 152, 219, 0.2); }
+        .step-badge.flashed, .step-badge.transferred, .step-badge.registered { 
+            background: rgba(63, 185, 80, 0.1); color: #3fb950; border-color: rgba(63, 185, 80, 0.2); 
+        }
+        .step-badge.failed { background: rgba(248, 81, 73, 0.1); color: #f85149; border-color: rgba(248, 81, 73, 0.2); }
+        
+        /* Session Stats Bar */
+        .session-bar {
+            display: flex;
+            gap: 24px;
+            margin-bottom: 24px;
+            padding: 16px 20px;
+            background: var(--bg-secondary);
+            border-radius: 12px;
+            border: 1px solid var(--border);
+            flex-wrap: wrap;
+        }
+        .session-stat {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+        .session-stat-icon { font-size: 18px; }
+        .session-stat-value { 
+            font-family: 'JetBrains Mono', monospace;
+            font-weight: 600;
+            color: var(--accent-blue);
+        }
+        .session-stat-label { font-size: 12px; color: var(--text-secondary); }
+        
+        /* Device Number Badge */
+        .device-number {
+            background: var(--accent-purple);
+            color: white;
+            font-size: 11px;
+            font-weight: 700;
+            padding: 2px 8px;
+            border-radius: 12px;
+            margin-right: 8px;
+            font-family: 'JetBrains Mono', monospace;
+        }
+        
+        .usb-location {
+            font-size: 11px;
+            color: var(--text-secondary);
+            margin-top: 4px;
+        }
+        
+        /* Logs Panel */
+        .logs-panel {
+            margin-top: 40px;
+            padding: 20px;
+            background: var(--bg-secondary);
+            border-radius: 16px;
+            border: 1px solid var(--border);
+        }
+        .logs-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 16px;
+        }
+        .logs-tabs {
+            display: flex;
+            gap: 8px;
+            margin-bottom: 16px;
+            overflow-x: auto;
+            padding-bottom: 8px;
+        }
+        .log-tab {
+            background: var(--bg-card);
+            border: 1px solid var(--border);
+            color: var(--text-secondary);
+            padding: 6px 12px;
+            border-radius: 6px;
+            font-size: 11px;
+            cursor: pointer;
+            white-space: nowrap;
+        }
+        .log-tab.active {
+            background: var(--accent-blue);
+            color: white;
+            border-color: var(--accent-blue);
+        }
+        .log-table {
+            width: 100%;
+            border-collapse: collapse;
+            font-size: 12px;
+        }
+        .log-table th, .log-table td {
+            padding: 8px 12px;
+            text-align: left;
+            border-bottom: 1px solid var(--border);
+        }
+        .log-table th {
+            background: var(--bg-card);
+            font-weight: 600;
+            text-transform: uppercase;
+            font-size: 10px;
+            letter-spacing: 0.5px;
+            color: var(--text-secondary);
+        }
+        .log-table td {
+            font-family: 'JetBrains Mono', monospace;
+        }
+        .log-table tr:hover td {
+            background: var(--bg-card);
+        }
+        .log-status-success { color: var(--accent-green); }
+        .log-status-failed { color: var(--accent-red); }
+        
+        .toggle-logs-btn {
+            background: var(--bg-card);
+            border: 1px solid var(--border);
+            color: var(--text-secondary);
+            padding: 8px 16px;
+            border-radius: 8px;
+            cursor: pointer;
+            font-size: 13px;
+        }
+        .toggle-logs-btn:hover {
+            background: var(--border);
+        }
+        
+        /* Login Modal */
+        .login-overlay {
+            position: fixed;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            background: var(--bg-primary);
+            z-index: 1000;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+        .login-card {
+            background: var(--bg-card);
+            border: 1px solid var(--border);
+            border-radius: 16px;
+            padding: 40px;
+            width: 100%;
+            max-width: 400px;
+            text-align: center;
+        }
+        .login-logo { font-size: 48px; margin-bottom: 16px; }
+        .login-title { font-size: 24px; font-weight: 700; margin-bottom: 8px; }
+        .login-subtitle { color: var(--text-secondary); margin-bottom: 32px; }
+        .login-form { display: flex; flex-direction: column; gap: 16px; }
+        .login-input {
+            background: var(--bg-primary);
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            padding: 12px 16px;
+            font-size: 14px;
+            color: var(--text-primary);
+            outline: none;
+            transition: border-color 0.2s;
+        }
+        .login-input:focus {
+            border-color: var(--accent-blue);
+        }
+        .login-input::placeholder { color: var(--text-secondary); }
+        .login-btn {
+            background: var(--accent-blue);
+            border: none;
+            border-radius: 8px;
+            padding: 14px;
+            font-size: 14px;
+            font-weight: 600;
+            color: white;
+            cursor: pointer;
+            transition: background 0.2s;
+        }
+        .login-btn:hover { background: #4a9be8; }
+        .login-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+        .login-error {
+            background: rgba(248, 81, 73, 0.1);
+            border: 1px solid var(--accent-red);
+            border-radius: 8px;
+            padding: 12px;
+            color: var(--accent-red);
+            font-size: 13px;
+            display: none;
+        }
+        .login-error.show { display: block; }
+        .login-offline {
+            background: rgba(210, 153, 34, 0.1);
+            border: 1px solid var(--accent-orange);
+            color: var(--accent-orange);
+        }
+        .skip-btn {
+            background: transparent;
+            border: 1px solid var(--border);
+            color: var(--text-secondary);
+            margin-top: 16px;
+        }
+        .skip-btn:hover { 
+            background: var(--bg-secondary);
+            color: var(--text-primary);
+        }
+        .auth-badge {
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+            padding: 4px 10px;
+            border-radius: 12px;
+            font-size: 11px;
+            font-weight: 600;
+        }
+        .auth-badge.authenticated { 
+            background: rgba(63, 185, 80, 0.1); 
+            color: var(--accent-green);
+        }
+        .auth-badge.offline { 
+            background: rgba(210, 153, 34, 0.1); 
+            color: var(--accent-orange);
+        }
+
+    </style>
+</head>
+<body>
+    <!-- Login Overlay (shown when auth fails) -->
+    <div class="login-overlay" id="login-overlay" style="display: none;">
+        <div class="login-card">
+            <div class="login-logo">🔐</div>
+            <div class="login-title">AutoTQ Production</div>
+            <div class="login-subtitle">Sign in to enable backend registration</div>
+            
+            <div class="login-error" id="login-error"></div>
+            
+            <form class="login-form" id="login-form" onsubmit="handleLogin(event)">
+                <input type="text" class="login-input" id="login-username" placeholder="Username" required>
+                <input type="password" class="login-input" id="login-password" placeholder="Password" required>
+                <button type="submit" class="login-btn" id="login-btn">Sign In</button>
+            </form>
+            
+            <button class="login-btn skip-btn" onclick="skipLogin()">
+                Continue Without Backend
+            </button>
+        </div>
+    </div>
+
+    <div class="container" id="main-container">
+        <header>
+            <div>
+                <h1>⚡ AutoTQ Production Station</h1>
+                <span class="auth-badge" id="auth-badge" style="display: none;"></span>
+            </div>
+            <div class="stats">
+                <div class="stat firmware">
+                    <div class="stat-value" id="firmware-version">--</div>
+                    <div class="stat-label">Firmware</div>
+                </div>
+                <div class="stat success">
+                    <div class="stat-value" id="total-success">0</div>
+                    <div class="stat-label">Programmed</div>
+                </div>
+                <div class="stat failed">
+                    <div class="stat-value" id="total-failed">0</div>
+                    <div class="stat-label">Failed</div>
+                </div>
+            </div>
+        </header>
+        
+        <div class="session-bar" id="session-stats">
+            <div class="session-stat lot-stat">
+                <span class="session-stat-icon">📦</span>
+                <div class="lot-input-wrapper">
+                    <input type="text" id="lot-input-inline" 
+                           placeholder="Enter Lot #" 
+                           maxlength="10" 
+                           pattern="[0-9]{10}"
+                           style="background: var(--bg-primary); border: 1px solid var(--border); border-radius: 6px; padding: 6px 10px; font-family: 'JetBrains Mono', monospace; font-size: 14px; color: var(--text-primary); width: 110px; text-align: center;"
+                           onkeypress="if(event.key==='Enter')setLotNumber()">
+                    <button onclick="setLotNumber()" style="background: var(--accent-purple); border: none; border-radius: 6px; padding: 6px 10px; color: white; cursor: pointer; font-size: 12px; margin-left: 4px;">Set</button>
+                </div>
+                <span class="session-stat-label">Lot Number (10 digits)</span>
+            </div>
+            <div class="session-stat">
+                <span class="session-stat-icon">⏱️</span>
+                <span class="session-stat-value" id="session-duration">0:00:00</span>
+                <span class="session-stat-label">Session</span>
+            </div>
+            <div class="session-stat">
+                <span class="session-stat-icon">📊</span>
+                <span class="session-stat-value" id="devices-per-hour">0</span>
+                <span class="session-stat-label">Devices/Hour</span>
+            </div>
+            <div class="session-stat">
+                <span class="session-stat-icon">⚡</span>
+                <span class="session-stat-value" id="avg-time">0s</span>
+                <span class="session-stat-label">Avg Time</span>
+            </div>
+            <div class="session-stat">
+                <span class="session-stat-icon">📋</span>
+                <span class="session-stat-value" id="total-devices">0</span>
+                <span class="session-stat-label">Total Seen</span>
+            </div>
+        </div>
+        
+        <div class="section-title">Active Devices</div>
+        <div class="devices-grid" id="active-devices">
+            <div class="empty-state">
+                <div class="empty-state-icon pulse">🔌</div>
+                <div class="empty-state-title">Waiting for devices</div>
+                <div class="empty-state-desc">Plug in an AutoTQ device via USB to begin</div>
+            </div>
+        </div>
+        
+        <div class="section-title">Recent Completions</div>
+        <div class="devices-grid" id="recent-devices"></div>
+        
+        <div class="logs-panel" id="logs-panel" style="display: none;">
+            <div class="logs-header">
+                <div class="section-title" style="margin: 0;">📝 Session Logs</div>
+                <button class="toggle-logs-btn" onclick="toggleLogs()">Hide Logs</button>
+            </div>
+            <div class="logs-tabs" id="logs-tabs"></div>
+            <div id="logs-content">
+                <table class="log-table">
+                    <thead>
+                        <tr>
+                            <th>Time</th>
+                            <th>Port</th>
+                            <th>MAC</th>
+                            <th>PCB</th>
+                            <th>FW</th>
+                            <th>Status</th>
+                            <th>Duration</th>
+                        </tr>
+                    </thead>
+                    <tbody id="logs-tbody"></tbody>
+                </table>
+            </div>
+        </div>
+        <div style="text-align: center; margin-top: 16px;">
+            <button class="toggle-logs-btn" id="show-logs-btn" onclick="toggleLogs()">📝 Show Session Logs</button>
+        </div>
+    </div>
+    
+    <script>
+        let authChecked = false;
+        let loginSkipped = false;
+        
+        async function handleLogin(event) {
+            event.preventDefault();
+            const username = document.getElementById('login-username').value;
+            const password = document.getElementById('login-password').value;
+            const btn = document.getElementById('login-btn');
+            const errorDiv = document.getElementById('login-error');
+            
+            btn.disabled = true;
+            btn.textContent = 'Signing in...';
+            errorDiv.classList.remove('show');
+            
+            try {
+                const response = await fetch('/api/login', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({username, password})
+                });
+                
+                const result = await response.json();
+                
+                if (result.success) {
+                    document.getElementById('login-overlay').style.display = 'none';
+                    authChecked = true;
+                    // Lot number is now edited inline in the header
+                } else {
+                    errorDiv.textContent = result.error || 'Login failed';
+                    errorDiv.classList.add('show');
+                }
+            } catch (error) {
+                errorDiv.textContent = 'Connection error. Check your network.';
+                errorDiv.classList.add('show');
+            }
+            
+            btn.disabled = false;
+            btn.textContent = 'Sign In';
+        }
+        
+        function skipLogin() {
+            loginSkipped = true;
+            document.getElementById('login-overlay').style.display = 'none';
+            // Send skip request to backend to unblock loop
+            fetch('/api/skip_auth', { method: 'POST' });
+        }
+        
+        function showLoginOverlay(authData) {
+            if (loginSkipped) return;
+            
+            const overlay = document.getElementById('login-overlay');
+            const errorDiv = document.getElementById('login-error');
+            
+            if (authData.status === 'offline') {
+                errorDiv.textContent = '⚠️ Backend server unreachable. Working in offline mode.';
+                errorDiv.classList.add('show', 'login-offline');
+            } else if (authData.status === 'failed') {
+                errorDiv.textContent = authData.error || 'Authentication required';
+                errorDiv.classList.add('show');
+            }
+            
+            overlay.style.display = 'flex';
+        }
+        
+        // Lot Number Handling - Inline in header
+        async function setLotNumber() {
+            const input = document.getElementById('lot-input-inline');
+            const lotNumber = input.value.trim();
+            
+            if (lotNumber.length !== 10 || !/^\d{10}$/.test(lotNumber)) {
+                input.style.borderColor = 'var(--accent-red)';
+                alert('Lot number must be exactly 10 digits');
+                return;
+            }
+            
+            try {
+                const response = await fetch('/api/lot_number', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({lot_number: lotNumber})
+                });
+                
+                const result = await response.json();
+                
+                if (result.success) {
+                    input.style.borderColor = 'var(--accent-green)';
+                    input.style.background = 'rgba(63, 185, 80, 0.1)';
+                    window.currentLotNumber = lotNumber;
+                } else {
+                    input.style.borderColor = 'var(--accent-red)';
+                    alert(result.message || 'Failed to set lot number');
+                }
+            } catch (error) {
+                input.style.borderColor = 'var(--accent-red)';
+                alert('Connection error');
+            }
+        }
+        
+        async function submitSerialNumber(port) {
+            const input = document.getElementById(`serial-input-${port}`);
+            const serialNumber = input.value.trim();
+            const btn = document.getElementById(`serial-btn-${port}`);
+            const errorDiv = document.getElementById(`serial-error-${port}`);
+            
+            if (serialNumber.length !== 4 || !/^\d{4}$/.test(serialNumber)) {
+                errorDiv.textContent = 'Enter exactly 4 digits';
+                errorDiv.style.display = 'block';
+                return;
+            }
+            
+            btn.disabled = true;
+            btn.textContent = 'Creating...';
+            errorDiv.style.display = 'none';
+            
+            try {
+                const response = await fetch('/api/serial_number', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({port: port, serial_number: serialNumber})
+                });
+                
+                const result = await response.json();
+                
+                if (!result.success) {
+                    errorDiv.textContent = result.message || 'Failed to create device';
+                    errorDiv.style.display = 'block';
+                    btn.disabled = false;
+                    btn.textContent = 'Create Device';
+                }
+                // If success, the device state will update and card will refresh
+            } catch (error) {
+                errorDiv.textContent = 'Connection error';
+                errorDiv.style.display = 'block';
+                btn.disabled = false;
+                btn.textContent = 'Create Device';
+            }
+        }
+        
+        async function sendAction(port, action) {
+            try {
+                await fetch('/api/action', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({port: port, action: action})
+                });
+            } catch (error) {
+                console.error('Action failed:', error);
+            }
+        }
+        
+        function getStepBadge(type, status) {
+            let label = status;
+            let className = status;
+            
+            // Map status to readable labels
+            if (status === 'pending') label = 'Pending';
+            else if (status === 'skipped') label = 'Skipped (Present)';
+            else if (status === 'flashed') label = 'Flashed';
+            else if (status === 'transferred') label = 'Transferred';
+            else if (status === 'registered_new') { label = 'Registered (New)'; className = 'registered'; }
+            else if (status === 'registered_existing') { label = 'Registered (Existing)'; className = 'skipped'; }
+            else if (status === 'registered') label = 'Registered';
+            else if (status === 'created') { label = 'Device Created'; className = 'registered'; }
+            else if (status === 'verified') { label = 'Device Verified'; className = 'skipped'; }
+            else if (status === 'updated') { label = 'Device Updated'; className = 'skipped'; }
+            else if (status === 'awaiting_serial') { label = 'Enter Serial'; className = 'pending'; }
+            else if (status === 'failed') label = 'Failed';
+
+            if (type === 'firmware' && status === 'pending') label = 'Firmware';
+            if (type === 'backend' && status === 'pending') label = 'Backend';
+            if (type === 'audio' && status === 'pending') label = 'Audio';
+            if (type === 'device' && status === 'pending') label = 'Device';
+
+            return `<div class="step-badge ${className}">${label}</div>`;
+        }
+
+        function createDeviceCard(device, isActive) {
+            const statusStyle = `background: ${device.status_color}22; color: ${device.status_color}; border: 1px solid ${device.status_color}44`;
+            const progressColor = device.status === 'COMPLETED' ? 'var(--accent-green)' : 
+                                  device.status === 'FAILED' ? 'var(--accent-red)' : device.status_color;
+            
+            const needsActionClass = device.needs_user_action ? 'needs-action' : '';
+            
+            let actionBanner = '';
+            if (device.needs_user_action) {
+                actionBanner = `
+                    <div class="action-banner">
+                        <div class="action-banner-icon">🔋</div>
+                        <div class="action-banner-title">Action Required</div>
+                        <div class="action-banner-desc">${device.user_action_message}</div>
+                    </div>
+                `;
+            }
+            
+            let controls = '';
+            const canControl = device.is_complete || device.status === 'DETECTED' || device.status === 'FAILED';
+            if (isActive && canControl) {
+                controls = `
+                    <div class="control-buttons">
+                        <button class="btn" onclick="sendAction('${device.port}', 'flash_firmware')">Flash FW</button>
+                        <button class="btn" onclick="sendAction('${device.port}', 'flash_audio')">Flash Audio</button>
+                    </div>
+                `;
+            }
+            
+            // Step Badges
+            const steps = device.steps || { firmware: 'pending', backend: 'pending', audio: 'pending', device: 'pending' };
+            const stepBadges = `
+                <div class="status-steps">
+                    ${getStepBadge('firmware', steps.firmware)}
+                    ${getStepBadge('backend', steps.backend)}
+                    ${getStepBadge('audio', steps.audio)}
+                    ${steps.device && steps.device !== 'pending' ? getStepBadge('device', steps.device) : ''}
+                </div>
+            `;
+            
+            // Serial number input - Show for ANY device without GS1 barcode (even completed ones)
+            // This allows entering serial at any time as long as device doesn't have GS1 yet
+            let serialInput = '';
+            const hasLotNumber = window.currentLotNumber && window.currentLotNumber.length === 10;
+            const isReady = device.status === 'AWAITING_SERIAL' || (device.is_complete && !device.gs1_barcode);
+            const canSubmit = hasLotNumber && isReady;
+            // Show input if: backend enabled AND no GS1 yet (regardless of completion status)
+            const showInput = window.backendEnabled && !device.gs1_barcode;
+            
+            if (showInput) {
+                let boxStyle, headerText, headerColor, btnDisabled, btnText;
+                
+                if (!hasLotNumber) {
+                    // No lot number - show warning
+                    boxStyle = 'background: rgba(210, 153, 34, 0.1); border: 1px solid var(--accent-orange);';
+                    headerText = '⚠️ Set Lot Number First (10 digits in header)';
+                    headerColor = 'var(--accent-orange)';
+                    btnDisabled = 'disabled';
+                    btnText = 'Need Lot #';
+                } else if (!isReady) {
+                    // Has lot number but still processing
+                    boxStyle = 'background: var(--bg-secondary); border: 1px solid var(--border);';
+                    headerText = '⏳ Processing... (enter serial now)';
+                    headerColor = 'var(--text-secondary)';
+                    btnDisabled = 'disabled';
+                    btnText = 'Processing...';
+                } else {
+                    // Ready to submit - either AWAITING_SERIAL or COMPLETED without GS1
+                    boxStyle = 'background: rgba(155, 89, 247, 0.1); border: 1px solid var(--accent-purple);';
+                    headerText = '📝 Enter Serial Number to Create Device';
+                    headerColor = 'var(--accent-purple)';
+                    btnDisabled = '';
+                    btnText = 'Create Device';
+                }
+                
+                serialInput = `
+                    <div class="serial-input-box" style="${boxStyle} border-radius: 8px; padding: 16px; margin: 12px 0;">
+                        <div style="font-weight: 600; color: ${headerColor}; margin-bottom: 8px;">
+                            ${headerText}
+                        </div>
+                        <div style="display: flex; gap: 8px; align-items: center;">
+                            <input type="text" id="serial-input-${device.port}" 
+                                   class="login-input" 
+                                   placeholder="0001" 
+                                   maxlength="4" 
+                                   pattern="[0-9]{4}"
+                                   style="flex: 1; font-family: 'JetBrains Mono', monospace; font-size: 20px; text-align: center; padding: 10px;"
+                                   onkeypress="if(event.key==='Enter' && !document.getElementById('serial-btn-${device.port}').disabled)submitSerialNumber('${device.port}')"
+                            >
+                            <button id="serial-btn-${device.port}" class="btn" onclick="submitSerialNumber('${device.port}')" 
+                                    style="background: var(--accent-purple); padding: 10px 20px;" ${btnDisabled}>${btnText}</button>
+                        </div>
+                        <div id="serial-error-${device.port}" style="color: var(--accent-red); font-size: 12px; margin-top: 8px; display: none;"></div>
+                        <div style="color: var(--text-secondary); font-size: 11px; margin-top: 8px;">
+                            4-digit serial → GS1: <span style="font-family: monospace;">${hasLotNumber ? window.currentLotNumber : '??????????'}${device.serial_number || 'XXXX'}</span>
+                        </div>
+                    </div>
+                `;
+            }
+            
+            // GS1 info (shown when device created)
+            let gs1Info = '';
+            if (device.gs1_barcode) {
+                gs1Info = `
+                    <div style="background: rgba(63, 185, 80, 0.1); border: 1px solid var(--accent-green); border-radius: 8px; padding: 12px; margin: 12px 0;">
+                        <div style="font-weight: 600; color: var(--accent-green); margin-bottom: 4px;">✅ Device Created</div>
+                        <div style="font-family: 'JetBrains Mono', monospace; font-size: 16px; color: var(--text-primary);">GS1: ${device.gs1_barcode}</div>
+                        ${device.device_id ? `<div style="font-size: 12px; color: var(--text-secondary);">Device ID: ${device.device_id}</div>` : ''}
+                    </div>
+                `;
+            }
+
+            return `
+                <div class="device-card ${needsActionClass}">
+                    <div class="device-header">
+                        <span class="device-port">
+                            ${device.device_number ? `<span class="device-number">#${device.device_number}</span>` : ''}
+                            ${device.port}
+                        </span>
+                        <span class="device-status" style="${statusStyle}">
+                            ${device.status_icon} ${device.status_label}
+                        </span>
+                    </div>
+                    ${device.usb_location ? `<div class="usb-location">📍 ${device.usb_location}</div>` : ''}
+                    ${actionBanner}
+                    
+                    ${stepBadges}
+                    
+                    ${serialInput}
+                    ${gs1Info}
+
+                    <div class="device-message">${device.message}</div>
+                    
+                    ${device.status === 'FAILED' && device.errors.length > 0 ? `
+                        <div class="error-list" style="margin-bottom: 12px; padding: 8px; background: rgba(248, 81, 73, 0.1); border-radius: 6px; border: 1px solid rgba(248, 81, 73, 0.2);">
+                            <div style="font-size: 11px; font-weight: bold; color: var(--accent-red); margin-bottom: 4px;">ERRORS:</div>
+                            ${device.errors.map(e => `<div style="font-size: 11px; color: var(--text-secondary); font-family: monospace;">• ${e}</div>`).join('')}
+                        </div>
+                    ` : ''}
+
+                    <div class="progress-container">
+                        <div class="progress-bar" style="width: ${device.progress}%; background: ${progressColor}"></div>
+                    </div>
+                    <div class="device-meta">
+                        <div class="meta-item">
+                            <span class="meta-label">MAC Address</span>
+                            <span class="meta-value">${device.mac_address || '—'}</span>
+                        </div>
+                        <div class="meta-item">
+                            <span class="meta-label">PCB ID</span>
+                            <span class="meta-value">${device.pcb_id ? '#' + device.pcb_id : '—'}</span>
+                        </div>
+                        <div class="meta-item">
+                            <span class="meta-label">Firmware</span>
+                            <span class="meta-value">${device.firmware_version || '—'}</span>
+                        </div>
+                        <div class="meta-item">
+                            <span class="meta-label">Battery</span>
+                            <span class="meta-value">${device.battery_level !== null ? device.battery_level + '%' : '—'}</span>
+                        </div>
+                        ${device.gs1_barcode ? `
+                        <div class="meta-item">
+                            <span class="meta-label">GS1</span>
+                            <span class="meta-value" style="font-size: 11px;">${device.gs1_barcode}</span>
+                        </div>
+                        ` : ''}
+                    </div>
+                    ${controls}
+                </div>
+            `;
+        }
+        
+        let currentLogFile = null;
+        let logsVisible = false;
+        let logFiles = [];
+        
+        function formatDuration(seconds) {
+            const h = Math.floor(seconds / 3600);
+            const m = Math.floor((seconds % 3600) / 60);
+            const s = Math.floor(seconds % 60);
+            return `${h}:${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`;
+        }
+        
+        function toggleLogs() {
+            logsVisible = !logsVisible;
+            document.getElementById('logs-panel').style.display = logsVisible ? 'block' : 'none';
+            document.getElementById('show-logs-btn').style.display = logsVisible ? 'none' : 'inline-block';
+            if (logsVisible && currentLogFile) {
+                loadLogFile(currentLogFile);
+            }
+        }
+        
+        async function loadLogFile(filename) {
+            try {
+                const response = await fetch(`/api/logs/${filename}`);
+                const data = await response.json();
+                
+                if (data.error) {
+                    console.error('Log error:', data.error);
+                    return;
+                }
+                
+                currentLogFile = filename;
+                
+                // Update tabs
+                const tabsContainer = document.getElementById('logs-tabs');
+                tabsContainer.innerHTML = logFiles.map(f => 
+                    `<button class="log-tab ${f === filename ? 'active' : ''}" onclick="loadLogFile('${f}')">${f.replace('session_log_', '').replace('.csv', '')}</button>`
+                ).join('');
+                
+                // Update table
+                const tbody = document.getElementById('logs-tbody');
+                tbody.innerHTML = data.rows.reverse().map(row => `
+                    <tr>
+                        <td>${row.Timestamp || ''}</td>
+                        <td>${row.Port || ''}</td>
+                        <td>${row['MAC Address'] || ''}</td>
+                        <td>${row['PCB ID'] || ''}</td>
+                        <td>${row.Firmware || ''}</td>
+                        <td class="${row.Status === 'COMPLETED' ? 'log-status-success' : 'log-status-failed'}">${row.Status || ''}</td>
+                        <td>${row['Duration (s)'] || ''}s</td>
+                    </tr>
+                `).join('');
+            } catch (error) {
+                console.error('Failed to load log:', error);
+            }
+        }
+        
+        // Global variable to store current lot number and backend status
+        window.currentLotNumber = null;
+        window.backendEnabled = false;
+        
+        async function updateDashboard() {
+            try {
+                const response = await fetch('/api/state');
+                const data = await response.json();
+                
+                // Store global state
+                window.currentLotNumber = data.lot_number;
+                window.backendEnabled = data.backend_enabled;
+                
+                // AUTH OVERLAY:
+                // If backend auth failed or we're offline and the user hasn't chosen to skip,
+                // show the login overlay. Otherwise, hide it.
+                if (data.auth && !loginSkipped) {
+                    const overlay = document.getElementById('login-overlay');
+                    if (data.auth.status === 'failed' || data.auth.status === 'offline') {
+                        showLoginOverlay(data.auth);
+                    } else if (overlay) {
+                        overlay.style.display = 'none';
+                    }
+                }
+                
+                // Note: Lot number is edited inline in the header
+                
+                // Update auth badge
+                const authBadge = document.getElementById('auth-badge');
+                if (data.auth) {
+                    if (data.auth.status === 'authenticated') {
+                        authBadge.className = 'auth-badge authenticated';
+                        authBadge.innerHTML = `✓ ${data.auth.user || 'Connected'}`;
+                        authBadge.style.display = 'inline-flex';
+                    } else if (data.auth.status === 'offline' || loginSkipped) {
+                        authBadge.className = 'auth-badge offline';
+                        authBadge.innerHTML = '⚠ Offline Mode';
+                        authBadge.style.display = 'inline-flex';
+                    }
+                }
+                
+                // Update lot number input - but don't overwrite if user is typing
+                const lotInput = document.getElementById('lot-input-inline');
+                if (lotInput) {
+                    const isLotFocused = document.activeElement === lotInput;
+                    // Only update if server has a value AND user isn't currently typing
+                    if (data.lot_number && !isLotFocused) {
+                        if (lotInput.value !== data.lot_number) {
+                            lotInput.value = data.lot_number;
+                            lotInput.style.borderColor = 'var(--accent-green)';
+                            lotInput.style.background = 'rgba(63, 185, 80, 0.1)';
+                        }
+                    } else if (data.lot_number_set && lotInput.value === data.lot_number) {
+                        // Just update styling if lot is set
+                        lotInput.style.borderColor = 'var(--accent-green)';
+                        lotInput.style.background = 'rgba(63, 185, 80, 0.1)';
+                    }
+                }
+                
+                document.getElementById('firmware-version').textContent = data.firmware_version || '--';
+                document.getElementById('total-success').textContent = data.stats.total_programmed;
+                document.getElementById('total-failed').textContent = data.stats.total_failed;
+                
+                // Update session stats
+                if (data.session) {
+                    document.getElementById('session-duration').textContent = formatDuration(data.session.duration_seconds);
+                    document.getElementById('devices-per-hour').textContent = data.session.devices_per_hour || 0;
+                    document.getElementById('avg-time').textContent = (data.session.avg_time_seconds || 0) + 's';
+                    document.getElementById('total-devices').textContent = data.session.total_devices || 0;
+                    
+                    // Set current log file
+                    if (!currentLogFile && data.session.current_log_file) {
+                        currentLogFile = data.session.current_log_file.split('/').pop().split('\\').pop();
+                    }
+                }
+                
+                // Update log files list
+                if (data.log_files) {
+                    logFiles = data.log_files;
+                }
+                
+                const activeContainer = document.getElementById('active-devices');
+                
+                // PRESERVE serial input values and focus before rebuilding cards
+                const savedInputs = {};
+                let focusedPort = null;
+                document.querySelectorAll('[id^="serial-input-"]').forEach(input => {
+                    const port = input.id.replace('serial-input-', '');
+                    savedInputs[port] = input.value;
+                    if (document.activeElement === input) {
+                        focusedPort = port;
+                    }
+                });
+                
+                if (data.devices.length > 0) {
+                    activeContainer.innerHTML = data.devices.map(d => createDeviceCard(d, true)).join('');
+                    
+                    // RESTORE serial input values and focus after rebuild
+                    Object.keys(savedInputs).forEach(port => {
+                        const input = document.getElementById(`serial-input-${port}`);
+                        if (input && savedInputs[port]) {
+                            input.value = savedInputs[port];
+                        }
+                    });
+                    if (focusedPort) {
+                        const focusInput = document.getElementById(`serial-input-${focusedPort}`);
+                        if (focusInput) {
+                            focusInput.focus();
+                            // Move cursor to end
+                            focusInput.selectionStart = focusInput.selectionEnd = focusInput.value.length;
+                        }
+                    }
+                } else {
+                    activeContainer.innerHTML = `
+                        <div class="empty-state">
+                            <div class="empty-state-icon pulse">🔌</div>
+                            <div class="empty-state-title">Waiting for devices</div>
+                            <div class="empty-state-desc">Plug in an AutoTQ device via USB to begin</div>
+                        </div>
+                    `;
+                }
+                
+                const recentContainer = document.getElementById('recent-devices');
+                if (data.recent_completed.length > 0) {
+                    recentContainer.innerHTML = data.recent_completed.reverse().map(d => createDeviceCard(d, false)).join('');
+                } else {
+                    recentContainer.innerHTML = '<div style="color: var(--text-secondary); padding: 20px;">No completed devices yet</div>';
+                }
+            } catch (error) {
+                console.error('Failed to update dashboard:', error);
+            }
+        }
+        
+        setInterval(updateDashboard, 500);
+        updateDashboard();
+    </script>
+</body>
+</html>
+
+

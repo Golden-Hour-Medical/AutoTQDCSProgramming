@@ -29,7 +29,7 @@ except ImportError:
     HAS_WINSOUND = False
 
 try:
-    from flask import Flask, render_template_string, jsonify, request
+    from flask import Flask, render_template, jsonify, request
 except ImportError:
     print("❌ Flask not installed. Install with: pip install flask")
     sys.exit(1)
@@ -165,7 +165,7 @@ class AutoProductionManager:
         self.pending_resumes: Dict[str, DeviceTask] = {} # Store tasks waiting for replug
         self.port_locks: Dict[str, threading.Lock] = {} # Per-port locks to prevent concurrent access
         self.active_threads: Dict[str, threading.Thread] = {} # Track running threads per port
-        self.lock = threading.Lock()
+        self.lock = threading.RLock()  # RLock allows same thread to acquire multiple times (reentrant)
         self.running = True
         self.stats = {"total_programmed": 0, "total_failed": 0}
         
@@ -262,7 +262,7 @@ class AutoProductionManager:
                     time.sleep(0.1)
                     winsound.Beep(1500, 300) # Higher pitch
                 else:
-                    winsound.Beep(300, 500) # Low pitch, long
+                    winsound.Beep(300, 500) # Low pitch, long.
             except Exception:
                 pass
 
@@ -756,8 +756,12 @@ class AutoProductionManager:
                 return False, f"Device on {port} not found"
             task = self.active_devices[port]
             
-            if task.status != STATUS_AWAITING_SERIAL:
-                return False, f"Device not awaiting serial number (status: {task.status})"
+            # Allow serial submission for AWAITING_SERIAL or COMPLETED devices without GS1
+            if task.status not in [STATUS_AWAITING_SERIAL, STATUS_COMPLETED]:
+                return False, f"Device not ready for serial number (status: {task.status})"
+            
+            if task.gs1_barcode:
+                return False, f"Device already has GS1 barcode: {task.gs1_barcode}"
             
             if not task.mac_address:
                 return False, "Device MAC address not available"
@@ -782,12 +786,15 @@ class AutoProductionManager:
                 self._play_sound(success=False)
                 return False, message
             
+            # Determine if created new or verified existing
+            is_existing = "already exists" in message.lower() or "updated" in message.lower()
+            
             # Step 2: Update task
             with self.lock:
                 task.serial_number = serial_number
                 task.gs1_barcode = gs1_barcode
                 task.device_id = device_id
-                task.step_device = "created"
+                task.step_device = "verified" if is_existing else "created"
                 task.needs_user_action = False
                 task.user_action_message = ""
             
@@ -802,7 +809,8 @@ class AutoProductionManager:
             
             # Success!
             duration = time.time() - task.start_time
-            self.log_status(port, STATUS_COMPLETED, f"Device {gs1_barcode} created! ({duration:.1f}s)", progress=100)
+            status_msg = "verified" if is_existing else "created"
+            self.log_status(port, STATUS_COMPLETED, f"Device {gs1_barcode} {status_msg}! ({duration:.1f}s)", progress=100)
             self._play_sound(success=True)
             self._log_to_csv(task)
             
@@ -810,8 +818,8 @@ class AutoProductionManager:
                 self.stats["total_programmed"] += 1
                 self.completion_times.append(duration)
             
-            print(f"{Colors.OKGREEN}✅ [{port}] Device created: GS1={gs1_barcode}, Device ID={device_id}{Colors.ENDC}")
-            return True, f"Device {gs1_barcode} created successfully"
+            print(f"{Colors.OKGREEN}✅ [{port}] Device {status_msg}: GS1={gs1_barcode}, Device ID={device_id}{Colors.ENDC}")
+            return True, f"Device {gs1_barcode} {status_msg} successfully"
             
         except Exception as e:
             task.step_device = "failed"
@@ -820,21 +828,67 @@ class AutoProductionManager:
             self._play_sound(success=False)
             return False, str(e)
 
+    def _safe_json(self, response) -> Optional[dict]:
+        """Safely parse JSON from response, returning None if empty or invalid."""
+        try:
+            if response.text and response.text.strip():
+                return response.json()
+        except Exception:
+            pass
+        return None
+
     def _create_device_on_backend(self, gs1_barcode: str, mac_address: str, port: str) -> Tuple[bool, str, Optional[int]]:
         """Create device on backend with GS1 and MAC, handling existing devices."""
         if not self.client:
             return False, "Backend client not initialized", None
         
+        # Debug: print the base URL being used
+        # Note: base_url doesn't include /api/v1, we need to add it for device endpoints
+        base = f"{self.client.base_url}/api/v1"
+        print(f"{Colors.OKCYAN}[Device API] Using base URL: {base}{Colors.ENDC}")
+        
         try:
-            # First, check if device exists
-            check_resp = self.client.session.get(
-                f"{self.client.base_url}/devices/{gs1_barcode}",
-                timeout=10
-            )
+            # First, check if a device with this MAC already exists
+            mac_url = f"{base}/devices/by_mac/{mac_address}"
+            print(f"{Colors.OKCYAN}[Device API] GET {mac_url}{Colors.ENDC}")
+            mac_check_resp = self.client.session.get(mac_url, timeout=10)
+            print(f"{Colors.OKCYAN}[Device API] Response: {mac_check_resp.status_code} - {mac_check_resp.text[:200] if mac_check_resp.text else '(empty)'}{Colors.ENDC}")
+            
+            if mac_check_resp.status_code == 200:
+                # Device with this MAC already exists
+                existing_by_mac = self._safe_json(mac_check_resp)
+                if not existing_by_mac:
+                    return False, f"Invalid JSON response from MAC check", None
+                    
+                existing_gs1 = existing_by_mac.get('gs1_barcode', '')
+                existing_id = existing_by_mac.get('id')
+                
+                if existing_gs1 == gs1_barcode:
+                    # Same GS1 - device already properly registered
+                    print(f"{Colors.OKGREEN}✅ Device already exists with correct GS1: {gs1_barcode}{Colors.ENDC}")
+                    return True, "Device already exists (verified)", existing_id
+                else:
+                    # Different GS1 - MAC is already used by another device
+                    return False, f"MAC {mac_address} already registered to different GS1: {existing_gs1}", None
+            
+            elif mac_check_resp.status_code not in [404, 422]:
+                # Unexpected error
+                return False, f"MAC check failed ({mac_check_resp.status_code}): {mac_check_resp.text[:100]}", None
+            
+            # If MAC not found (404/422), proceed to check by GS1 or create new
+            
+            # Check if device exists by GS1
+            gs1_url = f"{base}/devices/{gs1_barcode}"
+            print(f"{Colors.OKCYAN}[Device API] GET {gs1_url}{Colors.ENDC}")
+            check_resp = self.client.session.get(gs1_url, timeout=10)
+            print(f"{Colors.OKCYAN}[Device API] Response: {check_resp.status_code} - {check_resp.text[:200] if check_resp.text else '(empty)'}{Colors.ENDC}")
             
             if check_resp.status_code == 200:
-                # Device exists - update MAC if needed
-                existing = check_resp.json()
+                # Device exists by GS1 - update MAC if needed
+                existing = self._safe_json(check_resp)
+                if not existing:
+                    return False, f"Invalid JSON response from GS1 check", None
+                    
                 existing_mac = existing.get('mac_address', '')
                 
                 if existing_mac and existing_mac != mac_address:
@@ -843,11 +897,14 @@ class AutoProductionManager:
                 
                 if not existing_mac or existing_mac != mac_address:
                     # Update MAC address
+                    mac_update_url = f"{base}/devices/{gs1_barcode}/mac-address"
+                    print(f"{Colors.OKCYAN}[Device API] PUT {mac_update_url}{Colors.ENDC}")
                     mac_resp = self.client.session.put(
-                        f"{self.client.base_url}/devices/{gs1_barcode}/mac-address",
+                        mac_update_url,
                         json={"mac_address": mac_address},
                         timeout=10
                     )
+                    print(f"{Colors.OKCYAN}[Device API] Response: {mac_resp.status_code}{Colors.ENDC}")
                     if mac_resp.status_code not in [200, 201]:
                         return False, f"Failed to associate MAC: {mac_resp.text}", None
                 
@@ -856,24 +913,27 @@ class AutoProductionManager:
             
             elif check_resp.status_code == 404:
                 # Device doesn't exist - create it
-                create_resp = self.client.session.post(
-                    f"{self.client.base_url}/devices/",
-                    json={
-                        "gs1_barcode": gs1_barcode,
-                        "model_name": "AutoTQ",
-                        "mac_address": mac_address,
-                        "inventory_status": "received_pending_review"
-                    },
-                    timeout=10
-                )
+                create_url = f"{base}/devices/"
+                create_data = {
+                    "gs1_barcode": gs1_barcode,
+                    "model_name": "AutoTQ",
+                    "mac_address": mac_address,
+                    "inventory_status": "received_pending_review"
+                }
+                print(f"{Colors.OKCYAN}[Device API] POST {create_url} with {create_data}{Colors.ENDC}")
+                create_resp = self.client.session.post(create_url, json=create_data, timeout=10)
+                print(f"{Colors.OKCYAN}[Device API] Response: {create_resp.status_code} - {create_resp.text[:200] if create_resp.text else '(empty)'}{Colors.ENDC}")
                 
                 if create_resp.status_code == 201:
-                    data = create_resp.json()
-                    device_id = data.get('id')
-                    api_key = data.get('api_key')
-                    if api_key:
-                        print(f"{Colors.WARNING}⚠️ Device API Key (save this!): {api_key}{Colors.ENDC}")
-                    return True, "Device created", device_id
+                    data = self._safe_json(create_resp)
+                    if data:
+                        device_id = data.get('id')
+                        api_key = data.get('api_key')
+                        if api_key:
+                            print(f"{Colors.WARNING}⚠️ Device API Key (save this!): {api_key}{Colors.ENDC}")
+                        return True, "Device created", device_id
+                    else:
+                        return True, "Device created (no response body)", None
                 elif create_resp.status_code == 409:
                     return False, "Device with this GS1 already exists (conflict)", None
                 else:
@@ -884,6 +944,8 @@ class AutoProductionManager:
         except requests.exceptions.RequestException as e:
             return False, f"Network error: {str(e)}", None
         except Exception as e:
+            import traceback
+            traceback.print_exc()
             return False, f"Error: {str(e)}", None
 
     def _verify_device_on_backend(self, gs1_barcode: str, expected_mac: str) -> Tuple[bool, str]:
@@ -892,8 +954,10 @@ class AutoProductionManager:
             return False, "Backend client not initialized"
         
         try:
+            # Note: base_url doesn't include /api/v1, we need to add it
+            base = f"{self.client.base_url}/api/v1"
             resp = self.client.session.get(
-                f"{self.client.base_url}/devices/{gs1_barcode}",
+                f"{base}/devices/{gs1_barcode}",
                 timeout=10
             )
             
@@ -1114,7 +1178,8 @@ class AutoProductionManager:
                         if pcb_id:
                             # VALIDATION: Verify backend record exists
                             try:
-                                verify_pcb = self.client.session.get(f"{self.client.base_url}/pcbs/{pcb_id}", timeout=5)
+                                # Note: base_url doesn't include /api/v1
+                                verify_pcb = self.client.session.get(f"{self.client.base_url}/api/v1/pcbs/{pcb_id}", timeout=5)
                                 if verify_pcb.status_code == 200:
                                     task.pcb_id = pcb_id
                                     task.step_backend = "registered_new" if is_new else "registered_existing"
@@ -1356,1117 +1421,15 @@ class AutoProductionManager:
                 
             time.sleep(1.0)
 
+#
 # --- WEB DASHBOARD ---
-HTML_TEMPLATE = """
-<!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>AutoTQ Production Station</title>
-    <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600&family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
-    <style>
-        :root {
-            --bg-primary: #0d1117;
-            --bg-secondary: #161b22;
-            --bg-card: #21262d;
-            --border: #30363d;
-            --text-primary: #f0f6fc;
-            --text-secondary: #8b949e;
-            --accent-blue: #58a6ff;
-            --accent-green: #3fb950;
-            --accent-orange: #d29922;
-            --accent-red: #f85149;
-            --accent-purple: #a371f7;
-            --badge-gray: #30363d;
-        }
-        * { margin: 0; padding: 0; box-sizing: border-box; }
-        body {
-            font-family: 'Inter', -apple-system, sans-serif;
-            background: var(--bg-primary);
-            color: var(--text-primary);
-            min-height: 100vh;
-            padding: 24px;
-        }
-        .container { max-width: 1400px; margin: 0 auto; }
-        header {
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
-            margin-bottom: 32px;
-            padding-bottom: 24px;
-            border-bottom: 1px solid var(--border);
-        }
-        h1 {
-            font-size: 28px;
-            font-weight: 700;
-            background: linear-gradient(135deg, var(--accent-blue), var(--accent-purple));
-            -webkit-background-clip: text;
-            -webkit-text-fill-color: transparent;
-        }
-        .stats {
-            display: flex;
-            gap: 24px;
-        }
-        .stat {
-            text-align: center;
-            padding: 12px 20px;
-            background: var(--bg-secondary);
-            border-radius: 12px;
-            border: 1px solid var(--border);
-        }
-        .stat-value {
-            font-size: 28px;
-            font-weight: 700;
-            font-family: 'JetBrains Mono', monospace;
-        }
-        .stat-label { font-size: 12px; color: var(--text-secondary); text-transform: uppercase; letter-spacing: 0.5px; }
-        .stat.success .stat-value { color: var(--accent-green); }
-        .stat.failed .stat-value { color: var(--accent-red); }
-        .stat.firmware .stat-value { color: var(--accent-purple); font-size: 18px; }
-        
-        .section-title {
-            font-size: 14px;
-            font-weight: 600;
-            color: var(--text-secondary);
-            text-transform: uppercase;
-            letter-spacing: 1px;
-            margin-bottom: 16px;
-        }
-        .devices-grid {
-            display: grid;
-            grid-template-columns: repeat(auto-fill, minmax(380px, 1fr));
-            gap: 16px;
-            margin-bottom: 40px;
-        }
-        .device-card {
-            background: var(--bg-card);
-            border: 1px solid var(--border);
-            border-radius: 16px;
-            padding: 20px;
-            transition: all 0.2s ease;
-            position: relative;
-        }
-        .device-card:hover {
-            border-color: var(--accent-blue);
-            transform: translateY(-2px);
-        }
-        .device-card.needs-action {
-            border-color: var(--accent-red);
-            animation: pulse-border 2s infinite;
-        }
-        @keyframes pulse-border {
-            0%, 100% { box-shadow: 0 0 0 0 rgba(248, 81, 73, 0.4); }
-            50% { box-shadow: 0 0 0 8px rgba(248, 81, 73, 0); }
-        }
-        .device-header {
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
-            margin-bottom: 16px;
-        }
-        .device-port {
-            font-family: 'JetBrains Mono', monospace;
-            font-size: 18px;
-            font-weight: 600;
-        }
-        .device-status {
-            display: flex;
-            align-items: center;
-            gap: 6px;
-            padding: 6px 12px;
-            border-radius: 20px;
-            font-size: 12px;
-            font-weight: 600;
-        }
-        .device-message {
-            font-size: 14px;
-            color: var(--text-secondary);
-            margin-bottom: 16px;
-            min-height: 20px;
-        }
-        .progress-container {
-            background: var(--bg-primary);
-            border-radius: 8px;
-            height: 8px;
-            overflow: hidden;
-            margin-bottom: 16px;
-        }
-        .progress-bar {
-            height: 100%;
-            border-radius: 8px;
-            transition: width 0.3s ease;
-        }
-        .device-meta {
-            display: grid;
-            grid-template-columns: repeat(2, 1fr);
-            gap: 12px;
-            font-size: 13px;
-        }
-        .meta-item {
-            display: flex;
-            flex-direction: column;
-            gap: 2px;
-        }
-        .meta-label { color: var(--text-secondary); font-size: 11px; text-transform: uppercase; }
-        .meta-value { font-family: 'JetBrains Mono', monospace; font-weight: 500; }
-        
-        .action-banner {
-            background: linear-gradient(135deg, #f8514922, #f8514911);
-            border: 1px solid var(--accent-red);
-            border-radius: 12px;
-            padding: 16px;
-            margin-bottom: 16px;
-            text-align: center;
-        }
-        .action-banner-icon {
-            font-size: 32px;
-            margin-bottom: 8px;
-        }
-        .action-banner-title {
-            font-weight: 600;
-            color: var(--accent-red);
-            margin-bottom: 4px;
-        }
-        .action-banner-desc {
-            font-size: 13px;
-            color: var(--text-secondary);
-            margin-bottom: 12px;
-        }
-        
-        .control-buttons {
-            display: flex;
-            gap: 8px;
-            margin-top: 16px;
-            padding-top: 16px;
-            border-top: 1px solid var(--border);
-        }
-        
-        .btn {
-            background: var(--bg-secondary);
-            border: 1px solid var(--border);
-            color: var(--text-primary);
-            padding: 8px 12px;
-            border-radius: 6px;
-            font-size: 12px;
-            font-weight: 600;
-            cursor: pointer;
-            transition: all 0.2s;
-            flex: 1;
-        }
-        .btn:hover {
-            background: var(--border);
-        }
-        
-        .btn-primary {
-            background: var(--accent-blue);
-            border-color: var(--accent-blue);
-        }
-        .btn-primary:hover {
-            background: #4a9be8;
-        }
-        
-        .empty-state {
-            text-align: center;
-            padding: 60px 20px;
-            background: var(--bg-secondary);
-            border-radius: 16px;
-            border: 2px dashed var(--border);
-        }
-        .empty-state-icon { font-size: 48px; margin-bottom: 16px; }
-        .empty-state-title { font-size: 20px; font-weight: 600; margin-bottom: 8px; }
-        .empty-state-desc { color: var(--text-secondary); }
-        
-        .pulse { animation: pulse 2s infinite; }
-        @keyframes pulse {
-            0%, 100% { opacity: 1; }
-            50% { opacity: 0.5; }
-        }
 
-        /* Status Badges Row */
-        .status-steps {
-            display: flex;
-            gap: 8px;
-            margin-top: 12px;
-            margin-bottom: 12px;
-        }
-        .step-badge {
-            flex: 1;
-            font-size: 11px;
-            text-transform: uppercase;
-            padding: 4px 8px;
-            border-radius: 6px;
-            text-align: center;
-            font-weight: 600;
-            background: var(--badge-gray);
-            color: var(--text-secondary);
-            border: 1px solid transparent;
-        }
-        .step-badge.pending { opacity: 0.5; }
-        .step-badge.skipped { background: rgba(52, 152, 219, 0.1); color: #3498db; border-color: rgba(52, 152, 219, 0.2); }
-        .step-badge.flashed, .step-badge.transferred, .step-badge.registered { 
-            background: rgba(63, 185, 80, 0.1); color: #3fb950; border-color: rgba(63, 185, 80, 0.2); 
-        }
-        .step-badge.failed { background: rgba(248, 81, 73, 0.1); color: #f85149; border-color: rgba(248, 81, 73, 0.2); }
-        
-        /* Session Stats Bar */
-        .session-bar {
-            display: flex;
-            gap: 24px;
-            margin-bottom: 24px;
-            padding: 16px 20px;
-            background: var(--bg-secondary);
-            border-radius: 12px;
-            border: 1px solid var(--border);
-            flex-wrap: wrap;
-        }
-        .session-stat {
-            display: flex;
-            align-items: center;
-            gap: 8px;
-        }
-        .session-stat-icon { font-size: 18px; }
-        .session-stat-value { 
-            font-family: 'JetBrains Mono', monospace;
-            font-weight: 600;
-            color: var(--accent-blue);
-        }
-        .session-stat-label { font-size: 12px; color: var(--text-secondary); }
-        
-        /* Device Number Badge */
-        .device-number {
-            background: var(--accent-purple);
-            color: white;
-            font-size: 11px;
-            font-weight: 700;
-            padding: 2px 8px;
-            border-radius: 12px;
-            margin-right: 8px;
-            font-family: 'JetBrains Mono', monospace;
-        }
-        
-        .usb-location {
-            font-size: 11px;
-            color: var(--text-secondary);
-            margin-top: 4px;
-        }
-        
-        /* Logs Panel */
-        .logs-panel {
-            margin-top: 40px;
-            padding: 20px;
-            background: var(--bg-secondary);
-            border-radius: 16px;
-            border: 1px solid var(--border);
-        }
-        .logs-header {
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
-            margin-bottom: 16px;
-        }
-        .logs-tabs {
-            display: flex;
-            gap: 8px;
-            margin-bottom: 16px;
-            overflow-x: auto;
-            padding-bottom: 8px;
-        }
-        .log-tab {
-            background: var(--bg-card);
-            border: 1px solid var(--border);
-            color: var(--text-secondary);
-            padding: 6px 12px;
-            border-radius: 6px;
-            font-size: 11px;
-            cursor: pointer;
-            white-space: nowrap;
-        }
-        .log-tab.active {
-            background: var(--accent-blue);
-            color: white;
-            border-color: var(--accent-blue);
-        }
-        .log-table {
-            width: 100%;
-            border-collapse: collapse;
-            font-size: 12px;
-        }
-        .log-table th, .log-table td {
-            padding: 8px 12px;
-            text-align: left;
-            border-bottom: 1px solid var(--border);
-        }
-        .log-table th {
-            background: var(--bg-card);
-            font-weight: 600;
-            text-transform: uppercase;
-            font-size: 10px;
-            letter-spacing: 0.5px;
-            color: var(--text-secondary);
-        }
-        .log-table td {
-            font-family: 'JetBrains Mono', monospace;
-        }
-        .log-table tr:hover td {
-            background: var(--bg-card);
-        }
-        .log-status-success { color: var(--accent-green); }
-        .log-status-failed { color: var(--accent-red); }
-        
-        .toggle-logs-btn {
-            background: var(--bg-card);
-            border: 1px solid var(--border);
-            color: var(--text-secondary);
-            padding: 8px 16px;
-            border-radius: 8px;
-            cursor: pointer;
-            font-size: 13px;
-        }
-        .toggle-logs-btn:hover {
-            background: var(--border);
-        }
-        
-        /* Login Modal */
-        .login-overlay {
-            position: fixed;
-            top: 0;
-            left: 0;
-            right: 0;
-            bottom: 0;
-            background: var(--bg-primary);
-            z-index: 1000;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-        }
-        .login-card {
-            background: var(--bg-card);
-            border: 1px solid var(--border);
-            border-radius: 16px;
-            padding: 40px;
-            width: 100%;
-            max-width: 400px;
-            text-align: center;
-        }
-        .login-logo { font-size: 48px; margin-bottom: 16px; }
-        .login-title { font-size: 24px; font-weight: 700; margin-bottom: 8px; }
-        .login-subtitle { color: var(--text-secondary); margin-bottom: 32px; }
-        .login-form { display: flex; flex-direction: column; gap: 16px; }
-        .login-input {
-            background: var(--bg-primary);
-            border: 1px solid var(--border);
-            border-radius: 8px;
-            padding: 12px 16px;
-            font-size: 14px;
-            color: var(--text-primary);
-            outline: none;
-            transition: border-color 0.2s;
-        }
-        .login-input:focus {
-            border-color: var(--accent-blue);
-        }
-        .login-input::placeholder { color: var(--text-secondary); }
-        .login-btn {
-            background: var(--accent-blue);
-            border: none;
-            border-radius: 8px;
-            padding: 14px;
-            font-size: 14px;
-            font-weight: 600;
-            color: white;
-            cursor: pointer;
-            transition: background 0.2s;
-        }
-        .login-btn:hover { background: #4a9be8; }
-        .login-btn:disabled { opacity: 0.5; cursor: not-allowed; }
-        .login-error {
-            background: rgba(248, 81, 73, 0.1);
-            border: 1px solid var(--accent-red);
-            border-radius: 8px;
-            padding: 12px;
-            color: var(--accent-red);
-            font-size: 13px;
-            display: none;
-        }
-        .login-error.show { display: block; }
-        .login-offline {
-            background: rgba(210, 153, 34, 0.1);
-            border: 1px solid var(--accent-orange);
-            color: var(--accent-orange);
-        }
-        .skip-btn {
-            background: transparent;
-            border: 1px solid var(--border);
-            color: var(--text-secondary);
-            margin-top: 16px;
-        }
-        .skip-btn:hover { 
-            background: var(--bg-secondary);
-            color: var(--text-primary);
-        }
-        .auth-badge {
-            display: inline-flex;
-            align-items: center;
-            gap: 6px;
-            padding: 4px 10px;
-            border-radius: 12px;
-            font-size: 11px;
-            font-weight: 600;
-        }
-        .auth-badge.authenticated { 
-            background: rgba(63, 185, 80, 0.1); 
-            color: var(--accent-green);
-        }
-        .auth-badge.offline { 
-            background: rgba(210, 153, 34, 0.1); 
-            color: var(--accent-orange);
-        }
-
-    </style>
-</head>
-<body>
-    <!-- Login Overlay (shown when auth fails) -->
-    <div class="login-overlay" id="login-overlay" style="display: none;">
-        <div class="login-card">
-            <div class="login-logo">🔐</div>
-            <div class="login-title">AutoTQ Production</div>
-            <div class="login-subtitle">Sign in to enable backend registration</div>
-            
-            <div class="login-error" id="login-error"></div>
-            
-            <form class="login-form" id="login-form" onsubmit="handleLogin(event)">
-                <input type="text" class="login-input" id="login-username" placeholder="Username" required>
-                <input type="password" class="login-input" id="login-password" placeholder="Password" required>
-                <button type="submit" class="login-btn" id="login-btn">Sign In</button>
-            </form>
-            
-            <button class="login-btn skip-btn" onclick="skipLogin()">
-                Continue Without Backend
-            </button>
-        </div>
-    </div>
-    
-    <!-- Lot Number Modal (shown after login) -->
-    <div class="login-overlay" id="lot-number-overlay" style="display: none;">
-        <div class="login-card">
-            <div class="login-logo">📦</div>
-            <div class="login-title">Enter Lot Number</div>
-            <div class="login-subtitle">10-digit lot number for this production run<br>(e.g., 2025120001)</div>
-            
-            <div class="login-error" id="lot-error"></div>
-            
-            <form class="login-form" id="lot-form" onsubmit="handleLotNumber(event)">
-                <input type="text" class="login-input" id="lot-input" placeholder="0000000000" maxlength="10" pattern="[0-9]{10}" required style="font-family: 'JetBrains Mono', monospace; font-size: 24px; text-align: center; letter-spacing: 2px;">
-                <div style="color: var(--text-secondary); font-size: 12px;">Format: YYYYMMNNNN (Year, Month, Sequential)</div>
-                <button type="submit" class="login-btn" id="lot-btn">Start Production</button>
-            </form>
-            
-            <button class="login-btn skip-btn" onclick="skipLotNumber()">
-                Continue Without Device Creation
-            </button>
-        </div>
-    </div>
-
-    <div class="container" id="main-container">
-        <header>
-            <div>
-                <h1>⚡ AutoTQ Production Station</h1>
-                <span class="auth-badge" id="auth-badge" style="display: none;"></span>
-            </div>
-            <div class="stats">
-                <div class="stat firmware">
-                    <div class="stat-value" id="firmware-version">--</div>
-                    <div class="stat-label">Firmware</div>
-                </div>
-                <div class="stat success">
-                    <div class="stat-value" id="total-success">0</div>
-                    <div class="stat-label">Programmed</div>
-                </div>
-                <div class="stat failed">
-                    <div class="stat-value" id="total-failed">0</div>
-                    <div class="stat-label">Failed</div>
-                </div>
-            </div>
-        </header>
-        
-        <div class="session-bar" id="session-stats">
-            <div class="session-stat">
-                <span class="session-stat-icon">📦</span>
-                <span class="session-stat-value" id="lot-number-display">Not Set</span>
-                <span class="session-stat-label">Lot Number</span>
-            </div>
-            <div class="session-stat">
-                <span class="session-stat-icon">⏱️</span>
-                <span class="session-stat-value" id="session-duration">0:00:00</span>
-                <span class="session-stat-label">Session</span>
-            </div>
-            <div class="session-stat">
-                <span class="session-stat-icon">📊</span>
-                <span class="session-stat-value" id="devices-per-hour">0</span>
-                <span class="session-stat-label">Devices/Hour</span>
-            </div>
-            <div class="session-stat">
-                <span class="session-stat-icon">⚡</span>
-                <span class="session-stat-value" id="avg-time">0s</span>
-                <span class="session-stat-label">Avg Time</span>
-            </div>
-            <div class="session-stat">
-                <span class="session-stat-icon">📋</span>
-                <span class="session-stat-value" id="total-devices">0</span>
-                <span class="session-stat-label">Total Seen</span>
-            </div>
-        </div>
-        
-        <div class="section-title">Active Devices</div>
-        <div class="devices-grid" id="active-devices">
-            <div class="empty-state">
-                <div class="empty-state-icon pulse">🔌</div>
-                <div class="empty-state-title">Waiting for devices</div>
-                <div class="empty-state-desc">Plug in an AutoTQ device via USB to begin</div>
-            </div>
-        </div>
-        
-        <div class="section-title">Recent Completions</div>
-        <div class="devices-grid" id="recent-devices"></div>
-        
-        <div class="logs-panel" id="logs-panel" style="display: none;">
-            <div class="logs-header">
-                <div class="section-title" style="margin: 0;">📝 Session Logs</div>
-                <button class="toggle-logs-btn" onclick="toggleLogs()">Hide Logs</button>
-            </div>
-            <div class="logs-tabs" id="logs-tabs"></div>
-            <div id="logs-content">
-                <table class="log-table">
-                    <thead>
-                        <tr>
-                            <th>Time</th>
-                            <th>Port</th>
-                            <th>MAC</th>
-                            <th>PCB</th>
-                            <th>FW</th>
-                            <th>Status</th>
-                            <th>Duration</th>
-                        </tr>
-                    </thead>
-                    <tbody id="logs-tbody"></tbody>
-                </table>
-            </div>
-        </div>
-        <div style="text-align: center; margin-top: 16px;">
-            <button class="toggle-logs-btn" id="show-logs-btn" onclick="toggleLogs()">📝 Show Session Logs</button>
-        </div>
-    </div>
-    
-    <script>
-        let authChecked = false;
-        let loginSkipped = false;
-        
-        async function handleLogin(event) {
-            event.preventDefault();
-            const username = document.getElementById('login-username').value;
-            const password = document.getElementById('login-password').value;
-            const btn = document.getElementById('login-btn');
-            const errorDiv = document.getElementById('login-error');
-            
-            btn.disabled = true;
-            btn.textContent = 'Signing in...';
-            errorDiv.classList.remove('show');
-            
-            try {
-                const response = await fetch('/api/login', {
-                    method: 'POST',
-                    headers: {'Content-Type': 'application/json'},
-                    body: JSON.stringify({username, password})
-                });
-                
-                const result = await response.json();
-                
-                if (result.success) {
-                    document.getElementById('login-overlay').style.display = 'none';
-                    authChecked = true;
-                    // Show lot number modal instead of reloading
-                    showLotNumberOverlay();
-                } else {
-                    errorDiv.textContent = result.error || 'Login failed';
-                    errorDiv.classList.add('show');
-                }
-            } catch (error) {
-                errorDiv.textContent = 'Connection error. Check your network.';
-                errorDiv.classList.add('show');
-            }
-            
-            btn.disabled = false;
-            btn.textContent = 'Sign In';
-        }
-        
-        function skipLogin() {
-            loginSkipped = true;
-            document.getElementById('login-overlay').style.display = 'none';
-            // Send skip request to backend to unblock loop
-            fetch('/api/skip_auth', { method: 'POST' });
-        }
-        
-        function showLoginOverlay(authData) {
-            if (loginSkipped) return;
-            
-            const overlay = document.getElementById('login-overlay');
-            const errorDiv = document.getElementById('login-error');
-            
-            if (authData.status === 'offline') {
-                errorDiv.textContent = '⚠️ Backend server unreachable. Working in offline mode.';
-                errorDiv.classList.add('show', 'login-offline');
-            } else if (authData.status === 'failed') {
-                errorDiv.textContent = authData.error || 'Authentication required';
-                errorDiv.classList.add('show');
-            }
-            
-            overlay.style.display = 'flex';
-        }
-        
-        // Lot Number Handling
-        let lotNumberSet = false;
-        
-        function showLotNumberOverlay() {
-            document.getElementById('lot-number-overlay').style.display = 'flex';
-            document.getElementById('lot-input').focus();
-        }
-        
-        async function handleLotNumber(event) {
-            event.preventDefault();
-            
-            const lotNumber = document.getElementById('lot-input').value.trim();
-            const btn = document.getElementById('lot-btn');
-            const errorDiv = document.getElementById('lot-error');
-            
-            btn.disabled = true;
-            btn.textContent = 'Setting...';
-            errorDiv.classList.remove('show');
-            
-            try {
-                const response = await fetch('/api/lot_number', {
-                    method: 'POST',
-                    headers: {'Content-Type': 'application/json'},
-                    body: JSON.stringify({lot_number: lotNumber})
-                });
-                
-                const result = await response.json();
-                
-                if (result.success) {
-                    lotNumberSet = true;
-                    document.getElementById('lot-number-overlay').style.display = 'none';
-                    document.getElementById('lot-number-display').textContent = lotNumber;
-                } else {
-                    errorDiv.textContent = result.message || 'Invalid lot number';
-                    errorDiv.classList.add('show');
-                }
-            } catch (error) {
-                errorDiv.textContent = 'Connection error. Check your network.';
-                errorDiv.classList.add('show');
-            }
-            
-            btn.disabled = false;
-            btn.textContent = 'Start Production';
-        }
-        
-        function skipLotNumber() {
-            lotNumberSet = false;
-            document.getElementById('lot-number-overlay').style.display = 'none';
-        }
-        
-        async function submitSerialNumber(port) {
-            const input = document.getElementById(`serial-input-${port}`);
-            const serialNumber = input.value.trim();
-            const btn = document.getElementById(`serial-btn-${port}`);
-            const errorDiv = document.getElementById(`serial-error-${port}`);
-            
-            if (serialNumber.length !== 4 || !/^\\d{4}$/.test(serialNumber)) {
-                errorDiv.textContent = 'Enter exactly 4 digits';
-                errorDiv.style.display = 'block';
-                return;
-            }
-            
-            btn.disabled = true;
-            btn.textContent = 'Creating...';
-            errorDiv.style.display = 'none';
-            
-            try {
-                const response = await fetch('/api/serial_number', {
-                    method: 'POST',
-                    headers: {'Content-Type': 'application/json'},
-                    body: JSON.stringify({port: port, serial_number: serialNumber})
-                });
-                
-                const result = await response.json();
-                
-                if (!result.success) {
-                    errorDiv.textContent = result.message || 'Failed to create device';
-                    errorDiv.style.display = 'block';
-                    btn.disabled = false;
-                    btn.textContent = 'Create Device';
-                }
-                // If success, the device state will update and card will refresh
-            } catch (error) {
-                errorDiv.textContent = 'Connection error';
-                errorDiv.style.display = 'block';
-                btn.disabled = false;
-                btn.textContent = 'Create Device';
-            }
-        }
-        
-        async function sendAction(port, action) {
-            try {
-                await fetch('/api/action', {
-                    method: 'POST',
-                    headers: {'Content-Type': 'application/json'},
-                    body: JSON.stringify({port: port, action: action})
-                });
-            } catch (error) {
-                console.error('Action failed:', error);
-            }
-        }
-        
-        function getStepBadge(type, status) {
-            let label = status;
-            let className = status;
-            
-            // Map status to readable labels
-            if (status === 'pending') label = 'Pending';
-            else if (status === 'skipped') label = 'Skipped (Present)';
-            else if (status === 'flashed') label = 'Flashed';
-            else if (status === 'transferred') label = 'Transferred';
-            else if (status === 'registered_new') { label = 'Registered (New)'; className = 'registered'; }
-            else if (status === 'registered_existing') { label = 'Registered (Existing)'; className = 'skipped'; }
-            else if (status === 'registered') label = 'Registered';
-            else if (status === 'created') { label = 'Device Created'; className = 'registered'; }
-            else if (status === 'updated') { label = 'Device Updated'; className = 'skipped'; }
-            else if (status === 'awaiting_serial') { label = 'Enter Serial'; className = 'pending'; }
-            else if (status === 'failed') label = 'Failed';
-
-            if (type === 'firmware' && status === 'pending') label = 'Firmware';
-            if (type === 'backend' && status === 'pending') label = 'Backend';
-            if (type === 'audio' && status === 'pending') label = 'Audio';
-            if (type === 'device' && status === 'pending') label = 'Device';
-
-            return `<div class="step-badge ${className}">${label}</div>`;
-        }
-
-        function createDeviceCard(device, isActive) {
-            const statusStyle = `background: ${device.status_color}22; color: ${device.status_color}; border: 1px solid ${device.status_color}44`;
-            const progressColor = device.status === 'COMPLETED' ? 'var(--accent-green)' : 
-                                  device.status === 'FAILED' ? 'var(--accent-red)' : device.status_color;
-            
-            const needsActionClass = device.needs_user_action ? 'needs-action' : '';
-            
-            let actionBanner = '';
-            if (device.needs_user_action) {
-                actionBanner = `
-                    <div class="action-banner">
-                        <div class="action-banner-icon">🔋</div>
-                        <div class="action-banner-title">Action Required</div>
-                        <div class="action-banner-desc">${device.user_action_message}</div>
-                    </div>
-                `;
-            }
-            
-            let controls = '';
-            const canControl = device.is_complete || device.status === 'DETECTED' || device.status === 'FAILED';
-            if (isActive && canControl) {
-                controls = `
-                    <div class="control-buttons">
-                        <button class="btn" onclick="sendAction('${device.port}', 'flash_firmware')">Flash FW</button>
-                        <button class="btn" onclick="sendAction('${device.port}', 'flash_audio')">Flash Audio</button>
-                    </div>
-                `;
-            }
-            
-            // Step Badges
-            const steps = device.steps || { firmware: 'pending', backend: 'pending', audio: 'pending', device: 'pending' };
-            const stepBadges = `
-                <div class="status-steps">
-                    ${getStepBadge('firmware', steps.firmware)}
-                    ${getStepBadge('backend', steps.backend)}
-                    ${getStepBadge('audio', steps.audio)}
-                    ${steps.device && steps.device !== 'pending' ? getStepBadge('device', steps.device) : ''}
-                </div>
-            `;
-            
-            // Serial number input (shown when lot number is set and device creation is active)
-            let serialInput = '';
-            // Show input if lot number is set AND backend is enabled AND (awaiting serial OR processing)
-            // But disable button if not ready
-            const canSubmit = device.status === 'AWAITING_SERIAL';
-            const showInput = window.currentLotNumber && ${String(data.backend_enabled).toLowerCase()} && 
-                              (device.status === 'AWAITING_SERIAL' || !device.is_complete);
-            
-            if (showInput && !device.gs1_barcode) {
-                const btnDisabled = !canSubmit ? 'disabled' : '';
-                const btnText = canSubmit ? 'Create Device' : 'Processing...';
-                const boxStyle = canSubmit 
-                    ? 'background: rgba(155, 89, 247, 0.1); border: 1px solid var(--accent-purple);' 
-                    : 'background: var(--bg-secondary); border: 1px solid var(--border); opacity: 0.8;';
-                
-                serialInput = `
-                    <div class="serial-input-box" style="${boxStyle} border-radius: 8px; padding: 16px; margin: 12px 0;">
-                        <div style="font-weight: 600; color: ${canSubmit ? 'var(--accent-purple)' : 'var(--text-secondary)'}; margin-bottom: 8px;">
-                            ${canSubmit ? '📝 Enter Serial Number' : '⏳ Processing Device...'}
-                        </div>
-                        <div style="display: flex; gap: 8px; align-items: center;">
-                            <input type="text" id="serial-input-${device.port}" 
-                                   class="login-input" 
-                                   placeholder="0001" 
-                                   maxlength="4" 
-                                   pattern="[0-9]{4}"
-                                   style="flex: 1; font-family: 'JetBrains Mono', monospace; font-size: 20px; text-align: center; padding: 10px;"
-                                   onkeypress="if(event.key==='Enter' && !this.disabled)submitSerialNumber('${device.port}')"
-                                   ${btnDisabled ? '' : ''} 
-                            >
-                            <button id="serial-btn-${device.port}" class="btn" onclick="submitSerialNumber('${device.port}')" 
-                                    style="background: var(--accent-purple); padding: 10px 20px;" ${btnDisabled}>${btnText}</button>
-                        </div>
-                        <div id="serial-error-${device.port}" style="color: var(--accent-red); font-size: 12px; margin-top: 8px; display: none;"></div>
-                        <div style="color: var(--text-secondary); font-size: 11px; margin-top: 8px;">
-                            4-digit serial (e.g., 0001, 0002, ...) → GS1: <span style="font-family: monospace;">${window.currentLotNumber || '??????????'}${device.serial_number || 'XXXX'}</span>
-                        </div>
-                    </div>
-                `;
-            }
-            
-            // GS1 info (shown when device created)
-            let gs1Info = '';
-            if (device.gs1_barcode) {
-                gs1Info = `
-                    <div style="background: rgba(63, 185, 80, 0.1); border: 1px solid var(--accent-green); border-radius: 8px; padding: 12px; margin: 12px 0;">
-                        <div style="font-weight: 600; color: var(--accent-green); margin-bottom: 4px;">✅ Device Created</div>
-                        <div style="font-family: 'JetBrains Mono', monospace; font-size: 16px; color: var(--text-primary);">GS1: ${device.gs1_barcode}</div>
-                        ${device.device_id ? `<div style="font-size: 12px; color: var(--text-secondary);">Device ID: ${device.device_id}</div>` : ''}
-                    </div>
-                `;
-            }
-
-            return `
-                <div class="device-card ${needsActionClass}">
-                    <div class="device-header">
-                        <span class="device-port">
-                            ${device.device_number ? `<span class="device-number">#${device.device_number}</span>` : ''}
-                            ${device.port}
-                        </span>
-                        <span class="device-status" style="${statusStyle}">
-                            ${device.status_icon} ${device.status_label}
-                        </span>
-                    </div>
-                    ${device.usb_location ? `<div class="usb-location">📍 ${device.usb_location}</div>` : ''}
-                    ${actionBanner}
-                    
-                    ${stepBadges}
-                    
-                    ${serialInput}
-                    ${gs1Info}
-
-                    <div class="device-message">${device.message}</div>
-                    
-                    ${device.status === 'FAILED' && device.errors.length > 0 ? `
-                        <div class="error-list" style="margin-bottom: 12px; padding: 8px; background: rgba(248, 81, 73, 0.1); border-radius: 6px; border: 1px solid rgba(248, 81, 73, 0.2);">
-                            <div style="font-size: 11px; font-weight: bold; color: var(--accent-red); margin-bottom: 4px;">ERRORS:</div>
-                            ${device.errors.map(e => `<div style="font-size: 11px; color: var(--text-secondary); font-family: monospace;">• ${e}</div>`).join('')}
-                        </div>
-                    ` : ''}
-
-                    <div class="progress-container">
-                        <div class="progress-bar" style="width: ${device.progress}%; background: ${progressColor}"></div>
-                    </div>
-                    <div class="device-meta">
-                        <div class="meta-item">
-                            <span class="meta-label">MAC Address</span>
-                            <span class="meta-value">${device.mac_address || '—'}</span>
-                        </div>
-                        <div class="meta-item">
-                            <span class="meta-label">PCB ID</span>
-                            <span class="meta-value">${device.pcb_id ? '#' + device.pcb_id : '—'}</span>
-                        </div>
-                        <div class="meta-item">
-                            <span class="meta-label">Firmware</span>
-                            <span class="meta-value">${device.firmware_version || '—'}</span>
-                        </div>
-                        <div class="meta-item">
-                            <span class="meta-label">Battery</span>
-                            <span class="meta-value">${device.battery_level !== null ? device.battery_level + '%' : '—'}</span>
-                        </div>
-                        ${device.gs1_barcode ? `
-                        <div class="meta-item">
-                            <span class="meta-label">GS1</span>
-                            <span class="meta-value" style="font-size: 11px;">${device.gs1_barcode}</span>
-                        </div>
-                        ` : ''}
-                    </div>
-                    ${controls}
-                </div>
-            `;
-        }
-        
-        let currentLogFile = null;
-        let logsVisible = false;
-        let logFiles = [];
-        
-        function formatDuration(seconds) {
-            const h = Math.floor(seconds / 3600);
-            const m = Math.floor((seconds % 3600) / 60);
-            const s = Math.floor(seconds % 60);
-            return `${h}:${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`;
-        }
-        
-        function toggleLogs() {
-            logsVisible = !logsVisible;
-            document.getElementById('logs-panel').style.display = logsVisible ? 'block' : 'none';
-            document.getElementById('show-logs-btn').style.display = logsVisible ? 'none' : 'inline-block';
-            if (logsVisible && currentLogFile) {
-                loadLogFile(currentLogFile);
-            }
-        }
-        
-        async function loadLogFile(filename) {
-            try {
-                const response = await fetch(`/api/logs/${filename}`);
-                const data = await response.json();
-                
-                if (data.error) {
-                    console.error('Log error:', data.error);
-                    return;
-                }
-                
-                currentLogFile = filename;
-                
-                // Update tabs
-                const tabsContainer = document.getElementById('logs-tabs');
-                tabsContainer.innerHTML = logFiles.map(f => 
-                    `<button class="log-tab ${f === filename ? 'active' : ''}" onclick="loadLogFile('${f}')">${f.replace('session_log_', '').replace('.csv', '')}</button>`
-                ).join('');
-                
-                // Update table
-                const tbody = document.getElementById('logs-tbody');
-                tbody.innerHTML = data.rows.reverse().map(row => `
-                    <tr>
-                        <td>${row.Timestamp || ''}</td>
-                        <td>${row.Port || ''}</td>
-                        <td>${row['MAC Address'] || ''}</td>
-                        <td>${row['PCB ID'] || ''}</td>
-                        <td>${row.Firmware || ''}</td>
-                        <td class="${row.Status === 'COMPLETED' ? 'log-status-success' : 'log-status-failed'}">${row.Status || ''}</td>
-                        <td>${row['Duration (s)'] || ''}s</td>
-                    </tr>
-                `).join('');
-            } catch (error) {
-                console.error('Failed to load log:', error);
-            }
-        }
-        
-        // Global variable to store current lot number
-        window.currentLotNumber = null;
-        
-        async function updateDashboard() {
-            try {
-                const response = await fetch('/api/state');
-                const data = await response.json();
-                
-                // Store lot number for serial input display
-                window.currentLotNumber = data.lot_number;
-                
-                // Check auth status on first load
-                if (!authChecked && !loginSkipped && data.auth) {
-                    if (data.auth.status === 'failed' || data.auth.status === 'offline') {
-                        showLoginOverlay(data.auth);
-                    } else if (data.auth.status === 'authenticated') {
-                        authChecked = true;
-                        // Show lot number overlay if authenticated but lot number not set
-                        if (!data.lot_number_set && data.backend_enabled && !lotNumberSet) {
-                            showLotNumberOverlay();
-                        }
-                    }
-                }
-                
-                // Update auth badge
-                const authBadge = document.getElementById('auth-badge');
-                if (data.auth) {
-                    if (data.auth.status === 'authenticated') {
-                        authBadge.className = 'auth-badge authenticated';
-                        authBadge.innerHTML = `✓ ${data.auth.user || 'Connected'}`;
-                        authBadge.style.display = 'inline-flex';
-                    } else if (data.auth.status === 'offline' || loginSkipped) {
-                        authBadge.className = 'auth-badge offline';
-                        authBadge.innerHTML = '⚠ Offline Mode';
-                        authBadge.style.display = 'inline-flex';
-                    }
-                }
-                
-                // Update lot number display
-                const lotDisplay = document.getElementById('lot-number-display');
-                if (data.lot_number) {
-                    lotDisplay.textContent = data.lot_number;
-                    lotDisplay.style.color = 'var(--accent-green)';
-                } else {
-                    lotDisplay.textContent = 'Not Set';
-                    lotDisplay.style.color = 'var(--text-secondary)';
-                }
-                
-                document.getElementById('firmware-version').textContent = data.firmware_version || '--';
-                document.getElementById('total-success').textContent = data.stats.total_programmed;
-                document.getElementById('total-failed').textContent = data.stats.total_failed;
-                
-                // Update session stats
-                if (data.session) {
-                    document.getElementById('session-duration').textContent = formatDuration(data.session.duration_seconds);
-                    document.getElementById('devices-per-hour').textContent = data.session.devices_per_hour || 0;
-                    document.getElementById('avg-time').textContent = (data.session.avg_time_seconds || 0) + 's';
-                    document.getElementById('total-devices').textContent = data.session.total_devices || 0;
-                    
-                    // Set current log file
-                    if (!currentLogFile && data.session.current_log_file) {
-                        currentLogFile = data.session.current_log_file.split('/').pop().split('\\\\').pop();
-                    }
-                }
-                
-                // Update log files list
-                if (data.log_files) {
-                    logFiles = data.log_files;
-                }
-                
-                const activeContainer = document.getElementById('active-devices');
-                if (data.devices.length > 0) {
-                    activeContainer.innerHTML = data.devices.map(d => createDeviceCard(d, true)).join('');
-                } else {
-                    activeContainer.innerHTML = `
-                        <div class="empty-state">
-                            <div class="empty-state-icon pulse">🔌</div>
-                            <div class="empty-state-title">Waiting for devices</div>
-                            <div class="empty-state-desc">Plug in an AutoTQ device via USB to begin</div>
-                        </div>
-                    `;
-                }
-                
-                const recentContainer = document.getElementById('recent-devices');
-                if (data.recent_completed.length > 0) {
-                    recentContainer.innerHTML = data.recent_completed.reverse().map(d => createDeviceCard(d, false)).join('');
-                } else {
-                    recentContainer.innerHTML = '<div style="color: var(--text-secondary); padding: 20px;">No completed devices yet</div>';
-                }
-            } catch (error) {
-                console.error('Failed to update dashboard:', error);
-            }
-        }
-        
-        setInterval(updateDashboard, 500);
-        updateDashboard();
-    </script>
-</body>
-</html>
-"""
-
-app = Flask(__name__)
+app = Flask(__name__, template_folder="templates")
 manager: Optional[AutoProductionManager] = None
 
 @app.route('/')
 def index():
-    return render_template_string(HTML_TEMPLATE)
+    return render_template("index.html")
 
 @app.route('/api/state')
 def api_state():
