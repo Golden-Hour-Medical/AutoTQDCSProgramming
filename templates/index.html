@@ -694,13 +694,15 @@
                 
                 const result = await response.json();
                 
-                if (!result.success) {
+                if (result.success) {
+                    // Clear the stored value on success
+                    delete window.serialInputValues[port];
+                } else {
                     errorDiv.textContent = result.message || 'Failed to create device';
                     errorDiv.style.display = 'block';
                     btn.disabled = false;
                     btn.textContent = 'Create Device';
                 }
-                // If success, the device state will update and card will refresh
             } catch (error) {
                 errorDiv.textContent = 'Connection error';
                 errorDiv.style.display = 'block';
@@ -822,6 +824,9 @@
                     btnText = 'Create Device';
                 }
                 
+                // Get saved value from persistent storage
+                const savedValue = window.serialInputValues[device.port] || '';
+                
                 serialInput = `
                     <div class="serial-input-box" style="${boxStyle} border-radius: 8px; padding: 16px; margin: 12px 0;">
                         <div style="font-weight: 600; color: ${headerColor}; margin-bottom: 8px;">
@@ -833,7 +838,9 @@
                                    placeholder="0001" 
                                    maxlength="4" 
                                    pattern="[0-9]{4}"
+                                   value="${savedValue}"
                                    style="flex: 1; font-family: 'JetBrains Mono', monospace; font-size: 20px; text-align: center; padding: 10px;"
+                                   oninput="window.serialInputValues['${device.port}']=this.value"
                                    onkeypress="if(event.key==='Enter' && !document.getElementById('serial-btn-${device.port}').disabled)submitSerialNumber('${device.port}')"
                             >
                             <button id="serial-btn-${device.port}" class="btn" onclick="submitSerialNumber('${device.port}')" 
@@ -979,6 +986,9 @@
         window.currentLotNumber = null;
         window.backendEnabled = false;
         
+        // PERSISTENT storage for serial input values (survives card rebuilds)
+        window.serialInputValues = {};
+        
         async function updateDashboard() {
             try {
                 const response = await fetch('/api/state');
@@ -1058,33 +1068,25 @@
                 
                 const activeContainer = document.getElementById('active-devices');
                 
-                // PRESERVE serial input values and focus before rebuilding cards
-                const savedInputs = {};
+                // Save which input is focused before rebuild
                 let focusedPort = null;
-                document.querySelectorAll('[id^="serial-input-"]').forEach(input => {
-                    const port = input.id.replace('serial-input-', '');
-                    savedInputs[port] = input.value;
-                    if (document.activeElement === input) {
-                        focusedPort = port;
-                    }
-                });
+                let cursorPos = 0;
+                const activeEl = document.activeElement;
+                if (activeEl && activeEl.id && activeEl.id.startsWith('serial-input-')) {
+                    focusedPort = activeEl.id.replace('serial-input-', '');
+                    cursorPos = activeEl.selectionStart || 0;
+                }
                 
                 if (data.devices.length > 0) {
                     activeContainer.innerHTML = data.devices.map(d => createDeviceCard(d, true)).join('');
                     
-                    // RESTORE serial input values and focus after rebuild
-                    Object.keys(savedInputs).forEach(port => {
-                        const input = document.getElementById(`serial-input-${port}`);
-                        if (input && savedInputs[port]) {
-                            input.value = savedInputs[port];
-                        }
-                    });
+                    // Restore focus to the input that was focused
                     if (focusedPort) {
                         const focusInput = document.getElementById(`serial-input-${focusedPort}`);
                         if (focusInput) {
                             focusInput.focus();
-                            // Move cursor to end
-                            focusInput.selectionStart = focusInput.selectionEnd = focusInput.value.length;
+                            // Restore cursor position
+                            focusInput.selectionStart = focusInput.selectionEnd = cursorPos;
                         }
                     }
                 } else {
