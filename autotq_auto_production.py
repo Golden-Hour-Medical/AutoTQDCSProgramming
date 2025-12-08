@@ -1374,17 +1374,21 @@ class AutoProductionManager:
                     ports_to_remove = []
                     for port, task in self.active_devices.items():
                         if port not in current_ports:
-                            # Only move to history if it was completed or failed, otherwise it's an "unplugged during op" error
-                            # BUT we want to keep it visible if it just finished.
-                            if task.status in [STATUS_COMPLETED, STATUS_FAILED]:
+                            # Check if thread is still running - don't mark as removed if processing
+                            thread_running = port in self.active_threads and self.active_threads[port].is_alive()
+                            
+                            if thread_running:
+                                # Thread is still running, port might just be busy - don't remove yet
+                                continue
+                            
+                            # Only move to history if it was completed or failed
+                            if task.status in [STATUS_COMPLETED, STATUS_FAILED, STATUS_AWAITING_SERIAL]:
                                 self.completed_history.append(task)
                                 ports_to_remove.append(port)
                             elif task.status != STATUS_REMOVED:
+                                # Device was unplugged during operation
                                 task.status = STATUS_REMOVED
                                 task.errors.append("Device unplugged")
-                                # We can keep it in active_devices as "REMOVED" until plugged back in?
-                                # Or move to history?
-                                # If we move to history, the UI will show it in "Recent".
                                 self.completed_history.append(task)
                                 ports_to_remove.append(port)
                     
