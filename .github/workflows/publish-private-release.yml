@@ -1,0 +1,95 @@
+name: Publish Private Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Release version (optional; default timestamp)"
+        required: false
+        type: string
+      update_worker:
+        description: "Update worker vars CURRENT_VERSION/CURRENT_OBJECT_KEY"
+        required: true
+        default: true
+        type: boolean
+
+jobs:
+  publish:
+    runs-on: windows-latest
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node (for wrangler)
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install Wrangler
+        run: npm install -g wrangler
+
+      - name: Setup AWS CLI
+        uses: aws-actions/setup-aws-cli@v4
+
+      - name: Write deploy config
+        shell: pwsh
+        run: |
+          @"
+          `$BucketName = "${{ secrets.CF_R2_BUCKET_NAME }}"
+          `$AccountId = "${{ secrets.CF_ACCOUNT_ID }}"
+          `$R2AccessKeyId = "${{ secrets.CF_R2_ACCESS_KEY_ID }}"
+          `$R2SecretAccessKey = "${{ secrets.CF_R2_SECRET_ACCESS_KEY }}"
+          `$ObjectPrefix = "releases"
+          `$GateResolveUrl = "https://${{ secrets.CF_WORKER_DOMAIN }}/resolve"
+          `$WranglerConfig = "deploy/wrangler.toml"
+          "@ | Set-Content -Path deploy/deploy.config.ps1 -NoNewline
+
+      - name: Write wrangler config
+        shell: pwsh
+        run: |
+          @"
+          name = "${{ secrets.CF_WORKER_NAME }}"
+          main = "worker.js"
+          compatibility_date = "2025-12-01"
+
+          [vars]
+          URL_TTL_SECONDS = "900"
+
+          [[r2_buckets]]
+          binding = "RELEASES"
+          bucket_name = "${{ secrets.CF_R2_BUCKET_NAME }}"
+          "@ | Set-Content -Path deploy/wrangler.toml -NoNewline
+
+      - name: Sync worker secrets (optional but recommended)
+        if: ${{ secrets.CF_ACCESS_PASSWORD != '' && secrets.CF_SIGNING_SECRET != '' }}
+        shell: pwsh
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        run: |
+          "${{ secrets.CF_ACCESS_PASSWORD }}" | wrangler secret put ACCESS_PASSWORD --config deploy/wrangler.toml
+          "${{ secrets.CF_SIGNING_SECRET }}" | wrangler secret put SIGNING_SECRET --config deploy/wrangler.toml
+
+      - name: Publish release
+        shell: pwsh
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        run: |
+          $version = "${{ github.event.inputs.version }}"
+          $updateWorkerInput = "${{ github.event.inputs.update_worker }}"
+          $updateWorker = $true
+          if ($updateWorkerInput -eq "false") { $updateWorker = $false }
+
+          $args = @(
+            "-NoProfile",
+            "-ExecutionPolicy", "Bypass",
+            "-File", "deploy/publish_release.ps1",
+            "-ConfigPath", "deploy/deploy.config.ps1"
+          )
+
+          if ($version) { $args += @("-Version", $version) }
+          if ($updateWorker) { $args += "-UpdateWorker" }
+
+          & powershell @args

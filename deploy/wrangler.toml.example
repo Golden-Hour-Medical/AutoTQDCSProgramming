@@ -1,0 +1,12 @@
+name = "autotq-gate"
+main = "worker.js"
+compatibility_date = "2025-12-01"
+
+# Set these per deploy:
+# CURRENT_VERSION and CURRENT_OBJECT_KEY are passed from publish_release.ps1 when -UpdateWorker is used.
+[vars]
+URL_TTL_SECONDS = "900"
+
+[[r2_buckets]]
+binding = "RELEASES"
+bucket_name = "autotq-releases"
