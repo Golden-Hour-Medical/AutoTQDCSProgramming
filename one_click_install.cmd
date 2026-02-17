@@ -17,15 +17,22 @@ set "APP_DIR=%INSTALL_ROOT%\app"
 set "VERSION_FILE=%INSTALL_ROOT%\installed_source_version.txt"
 set "REMOTE_VERSION_FILE=%TEMP%\autotq_remote_version.txt"
 set "NEED_DOWNLOAD=1"
+set "AUTOTQ_REPO_ZIP_URL=%REPO_ZIP_URL%"
+set "AUTOTQ_INSTALL_ROOT=%INSTALL_ROOT%"
+set "AUTOTQ_ZIP_PATH=%ZIP_PATH%"
+set "AUTOTQ_EXTRACT_DIR=%EXTRACT_DIR%"
+set "AUTOTQ_APP_DIR=%APP_DIR%"
+set "AUTOTQ_VERSION_FILE=%VERSION_FILE%"
+set "AUTOTQ_REMOTE_VERSION_FILE=%REMOTE_VERSION_FILE%"
 
 if not exist "%INSTALL_ROOT%" mkdir "%INSTALL_ROOT%" >nul 2>&1
 
 del "%REMOTE_VERSION_FILE%" >nul 2>&1
 powershell -NoProfile -ExecutionPolicy Bypass -Command ^
   "$ErrorActionPreference='Stop';" ^
-  "$h=(Invoke-WebRequest -UseBasicParsing -Method Head '%REPO_ZIP_URL%').Headers;" ^
+  "$h=(Invoke-WebRequest -UseBasicParsing -Method Head $env:AUTOTQ_REPO_ZIP_URL).Headers;" ^
   "$v=$h.ETag; if(-not $v){$v=$h.'Last-Modified'}; if(-not $v){$v='always-download'};" ^
-  "Set-Content -Path '%REMOTE_VERSION_FILE%' -Value $v -NoNewline"
+  "Set-Content -LiteralPath $env:AUTOTQ_REMOTE_VERSION_FILE -Value $v -NoNewline"
 if not errorlevel 1 (
   for /f "usebackq delims=" %%V in ("%REMOTE_VERSION_FILE%") do set "REMOTE_VERSION=%%V"
 )
@@ -43,16 +50,16 @@ if "%NEED_DOWNLOAD%"=="1" (
   powershell -NoProfile -ExecutionPolicy Bypass -Command ^
     "$ErrorActionPreference='Stop';" ^
     "$ProgressPreference='SilentlyContinue';" ^
-    "if(Test-Path '%EXTRACT_DIR%'){Remove-Item -Recurse -Force '%EXTRACT_DIR%'};" ^
-    "Invoke-WebRequest -UseBasicParsing '%REPO_ZIP_URL%' -OutFile '%ZIP_PATH%';" ^
-    "Expand-Archive -Force '%ZIP_PATH%' '%EXTRACT_DIR%';" ^
-    "$src=(Get-ChildItem '%EXTRACT_DIR%' -Directory | Select-Object -First 1).FullName;" ^
+    "if(Test-Path -LiteralPath $env:AUTOTQ_EXTRACT_DIR){Remove-Item -Recurse -Force -LiteralPath $env:AUTOTQ_EXTRACT_DIR -ErrorAction SilentlyContinue};" ^
+    "Invoke-WebRequest -UseBasicParsing $env:AUTOTQ_REPO_ZIP_URL -OutFile $env:AUTOTQ_ZIP_PATH;" ^
+    "Expand-Archive -Force -LiteralPath $env:AUTOTQ_ZIP_PATH -DestinationPath $env:AUTOTQ_EXTRACT_DIR;" ^
+    "$src=(Get-ChildItem -LiteralPath $env:AUTOTQ_EXTRACT_DIR -Directory | Select-Object -First 1).FullName;" ^
     "if(-not $src){throw 'Extracted folder not found'};" ^
-    "if(-not (Test-Path '%APP_DIR%')){New-Item -ItemType Directory -Force -Path '%APP_DIR%' | Out-Null};" ^
-    "Copy-Item -Path (Join-Path $src '*') -Destination '%APP_DIR%' -Recurse -Force;" ^
-    "Remove-Item -Force '%ZIP_PATH%' -ErrorAction SilentlyContinue;" ^
-    "Remove-Item -Recurse -Force '%EXTRACT_DIR%' -ErrorAction SilentlyContinue;" ^
-    "Set-Content -Path '%VERSION_FILE%' -Value $env:AUTOTQ_REMOTE_VERSION -NoNewline"
+    "if(-not (Test-Path -LiteralPath $env:AUTOTQ_APP_DIR)){New-Item -ItemType Directory -Force -Path $env:AUTOTQ_APP_DIR | Out-Null};" ^
+    "Copy-Item -Path (Join-Path $src '*') -Destination $env:AUTOTQ_APP_DIR -Recurse -Force;" ^
+    "Remove-Item -Force -LiteralPath $env:AUTOTQ_ZIP_PATH -ErrorAction SilentlyContinue;" ^
+    "Remove-Item -Recurse -Force -LiteralPath $env:AUTOTQ_EXTRACT_DIR -ErrorAction SilentlyContinue;" ^
+    "Set-Content -LiteralPath $env:AUTOTQ_VERSION_FILE -Value $env:AUTOTQ_REMOTE_VERSION -NoNewline"
   if errorlevel 1 (
     echo.
     echo [ERROR] Download or extraction failed.
