@@ -46,7 +46,7 @@ if defined REMOTE_VERSION goto :REMOTE_VERSION_READY
 set "RESOLVED_VERSION_FILE=%TEMP%\autotq_repo_version.txt"
 del "%RESOLVED_VERSION_FILE%" >nul 2>&1
 powershell -NoProfile -ExecutionPolicy Bypass -Command ^
-    "$ErrorActionPreference='Stop'; $h=(Invoke-WebRequest -Method Head -Uri '%REPO_ZIP_URL%').Headers; $v=$h.ETag; if(-not $v){$v=$h.'Last-Modified'}; if(-not $v){$v='always-download'}; Set-Content -Path '%RESOLVED_VERSION_FILE%' -Value $v -NoNewline"
+    "$ErrorActionPreference='Stop'; $h=(Invoke-WebRequest -UseBasicParsing -Method Head -Uri '%REPO_ZIP_URL%').Headers; $v=$h.ETag; if(-not $v){$v=$h.'Last-Modified'}; if(-not $v){$v='always-download'}; Set-Content -Path '%RESOLVED_VERSION_FILE%' -Value $v -NoNewline"
 if errorlevel 1 goto :REMOTE_VERSION_READY
 for /f "usebackq delims=" %%V in ("%RESOLVED_VERSION_FILE%") do set "REMOTE_VERSION=%%V"
 del "%RESOLVED_VERSION_FILE%" >nul 2>&1
@@ -67,7 +67,7 @@ echo [INFO] New source update detected. Downloading latest package...
 if exist "%EXTRACT_DIR%" rmdir /s /q "%EXTRACT_DIR%" >nul 2>&1
 
 powershell -NoProfile -ExecutionPolicy Bypass -Command ^
-    "$ErrorActionPreference='Stop'; $ProgressPreference='SilentlyContinue'; Invoke-WebRequest -Uri '%REPO_ZIP_URL%' -OutFile '%ZIP_PATH%'"
+    "$ErrorActionPreference='Stop'; $ProgressPreference='SilentlyContinue'; Invoke-WebRequest -UseBasicParsing -Uri '%REPO_ZIP_URL%' -OutFile '%ZIP_PATH%'"
 if errorlevel 1 (
     echo.
     echo [ERROR] Download failed. Check internet access and repository URL.
@@ -92,11 +92,17 @@ for /f "delims=" %%D in ('dir /b /ad "%EXTRACT_DIR%" 2^>nul') do (
 )
 if not defined RUN_DIR set "RUN_DIR=%EXTRACT_DIR%"
 
+set "ENTRY_SCRIPT=install_and_run.bat"
 if not exist "%RUN_DIR%\install_and_run.bat" (
-    echo.
-    echo [ERROR] install_and_run.bat was not found in downloaded package.
-    pause
-    goto :END_FAIL
+    if exist "%RUN_DIR%\run_auto_production.bat" (
+        set "ENTRY_SCRIPT=run_auto_production.bat"
+    ) else (
+        echo.
+        echo [ERROR] No runnable entry script found in downloaded package.
+        echo [ERROR] Expected install_and_run.bat or run_auto_production.bat
+        pause
+        goto :END_FAIL
+    )
 )
 
 if not exist "%APP_DIR%" mkdir "%APP_DIR%" >nul 2>&1
@@ -112,14 +118,14 @@ powershell -NoProfile -ExecutionPolicy Bypass -Command ^
     "Set-Content -Path '%VERSION_FILE%' -Value $env:AUTOTQ_REMOTE_VERSION -NoNewline"
 
 :RUN_INSTALLED
-if not exist "%APP_DIR%\install_and_run.bat" (
+if not exist "%APP_DIR%\%ENTRY_SCRIPT%" (
     echo.
-    echo [ERROR] Managed install is incomplete (install_and_run.bat missing).
+    echo [ERROR] Managed install is incomplete (%ENTRY_SCRIPT% missing).
     pause
     goto :END_FAIL
 )
 echo [INFO] Running installer from: %APP_DIR%
-call "%APP_DIR%\install_and_run.bat" %*
+call "%APP_DIR%\%ENTRY_SCRIPT%" %*
 if errorlevel 1 goto :END_FAIL
 goto :END_OK
 
