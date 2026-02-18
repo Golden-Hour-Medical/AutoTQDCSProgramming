@@ -225,7 +225,22 @@ if %errorlevel% neq 0 (
 echo Dependencies OK.
 
 REM ---------------------------------------------------------------------------
-REM 4. RUN SCRIPT
+REM 4. DOWNLOAD FIRMWARE AND AUDIO (if missing or updates available)
+REM ---------------------------------------------------------------------------
+echo.
+echo Checking firmware and audio files...
+"%PYEXE%" autotq_setup.py
+if %errorlevel% neq 0 (
+    echo.
+    echo [WARN] Setup download had issues. Continuing anyway...
+    echo        You can re-run autotq_setup.py later.
+    timeout /t 3 >nul
+) else (
+    echo [OK] Firmware and audio ready.
+)
+
+REM ---------------------------------------------------------------------------
+REM 5. RUN SCRIPT
 REM ---------------------------------------------------------------------------
 echo.
 echo Launching Production Station...
